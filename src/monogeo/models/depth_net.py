@@ -201,6 +201,7 @@ class DepthNet(nn.Module):
         self.up0 = UpConvBlock(n[0], 32)
 
         def disp_conv(ch: int) -> nn.Sequential:
+            """1-channel disparity head ending in a sigmoid."""
             return nn.Sequential(
                 nn.ReflectionPad2d(1), nn.Conv2d(ch, 1, 3, bias=True), nn.Sigmoid()
             )

@@ -374,6 +374,12 @@ def _section_timing(
         "### C++ vs Python inference\n\n",
         _table(["implementation", "mean (ms)", "p50 (ms)", "p95 (ms)", "notes"], rows),
     ]
+    if py is not None and isinstance(py.get("onnxruntime"), dict):
+        ort = py["onnxruntime"]
+        out.append(
+            f"\n- ONNX Runtime on the same graph: mean {_f(ort.get('mean_ms'), 3)} ms, "
+            f"p50 {_f(ort.get('p50_ms'), 3)} ms, p95 {_f(ort.get('p95_ms'), 3)} ms\n"
+        )
     if cmp_res is not None:
         out.append(
             f"\n- speedup (Python mean / C++ mean): **{_f(cmp_res.get('speedup_mean'), 3)}x**\n"

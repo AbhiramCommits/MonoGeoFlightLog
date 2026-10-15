@@ -17,7 +17,7 @@
     "max_features": 4000,
     "min_parallax_deg": 0.5
   },
-  "sequence_load_ms": 287.764665998111,
+  "sequence_load_ms": 94.08583299955353,
   "headline_pair": {
     "frame_pair": [
       96,
@@ -67,7 +67,7 @@
     },
     "true_baseline_m": 1.6085299692698898,
     "depth_map_coverage": 0.005408653846153846,
-    "runtime_ms": 32.786041003419086
+    "runtime_ms": 8.801417003269307
   },
   "aggregate_over_pairs": {
     "num_pairs": 12,
@@ -82,7 +82,7 @@
     "translation_angle_error_deg_median": 3.7898286135668893,
     "scale_from_gt_median": 1.7306134239230122,
     "true_baseline_m_median": 1.6423344800873114,
-    "runtime_ms_median": 32.49860350115341
+    "runtime_ms_median": 9.09162449897849
   },
   "pairs": [
     {
@@ -134,7 +134,7 @@
       },
       "true_baseline_m": 1.6782794060119057,
       "depth_map_coverage": 0.006479116586538462,
-      "runtime_ms": 31.1949579991051
+      "runtime_ms": 10.497499999473803
     },
     {
       "frame_pair": [
@@ -185,7 +185,7 @@
       },
       "true_baseline_m": 1.678194274955457,
       "depth_map_coverage": 0.009127103365384616,
-      "runtime_ms": 55.489667000074405
+      "runtime_ms": 9.144207993813325
     },
     {
       "frame_pair": [
@@ -236,7 +236,7 @@
       },
       "true_baseline_m": 1.672635008208092,
       "depth_map_coverage": 0.007061298076923077,
-      "runtime_ms": 35.191584000131115
+      "runtime_ms": 9.645209000154864
     },
     {
       "frame_pair": [
@@ -287,7 +287,7 @@
       },
       "true_baseline_m": 1.670148214483033,
       "depth_map_coverage": 0.007605919471153846,
-      "runtime_ms": 38.30875000130618
+      "runtime_ms": 9.039041004143655
     },
     {
       "frame_pair": [
@@ -338,7 +338,7 @@
       },
       "true_baseline_m": 1.6527556280975313,
       "depth_map_coverage": 0.004056490384615385,
-      "runtime_ms": 43.245917004242074
+      "runtime_ms": 8.72749999689404
     },
     {
       "frame_pair": [
@@ -389,7 +389,7 @@
       },
       "true_baseline_m": 1.6460290159245925,
       "depth_map_coverage": 0.007605919471153846,
-      "runtime_ms": 32.211165998887736
+      "runtime_ms": 9.885916995699517
     },
     {
       "frame_pair": [
@@ -440,7 +440,7 @@
       },
       "true_baseline_m": 1.6386399442500303,
       "depth_map_coverage": 0.006253756009615385,
-      "runtime_ms": 31.13570799905574
+      "runtime_ms": 9.607416999642737
     },
     {
       "frame_pair": [
@@ -491,7 +491,7 @@
       },
       "true_baseline_m": 1.63650224403457,
       "depth_map_coverage": 0.004225510817307692,
-      "runtime_ms": 30.96741600165842
+      "runtime_ms": 8.20587500493275
     },
     {
       "frame_pair": [
@@ -542,7 +542,7 @@
       },
       "true_baseline_m": 1.615201005847735,
       "depth_map_coverage": 0.006929837740384615,
-      "runtime_ms": 30.848249996779487
+      "runtime_ms": 8.194791997084394
     },
     {
       "frame_pair": [
@@ -593,7 +593,7 @@
       },
       "true_baseline_m": 1.6085299692698898,
       "depth_map_coverage": 0.005408653846153846,
-      "runtime_ms": 32.786041003419086
+      "runtime_ms": 8.801417003269307
     },
     {
       "frame_pair": [
@@ -644,7 +644,7 @@
       },
       "true_baseline_m": 1.6057070446877069,
       "depth_map_coverage": 0.005746694711538462,
-      "runtime_ms": 32.182124996325
+      "runtime_ms": 8.515707995684352
     },
     {
       "frame_pair": [
@@ -695,7 +695,7 @@
       },
       "true_baseline_m": 1.6072497442932883,
       "depth_map_coverage": 0.006929837740384615,
-      "runtime_ms": 49.70945799868787
+      "runtime_ms": 11.90212499932386
     }
   ]
 }

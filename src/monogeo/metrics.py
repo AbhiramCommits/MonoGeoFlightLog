@@ -34,7 +34,6 @@ __all__ = [
     "compose_relative_poses",
     "depth_metrics",
     "rpe",
-    "scaled_depth_metrics",
 ]
 
 _EPS = 1e-9
@@ -106,47 +105,6 @@ def depth_metrics(
         }
     )
     return out
-
-
-def scaled_depth_metrics(
-    pred: np.ndarray,
-    gt: np.ndarray,
-    mask: np.ndarray | None = None,
-    median_scale: bool = False,
-    min_depth: float = 1e-3,
-    max_depth: float = np.inf,
-) -> tuple[dict[str, Any], float]:
-    """Depth metrics with an optional global median rescaling.
-
-    Args:
-        pred: Predicted depth.
-        gt: Ground-truth depth.
-        mask: Optional validity mask.
-        median_scale: Multiply ``pred`` by ``median(gt / pred)`` before scoring.
-        min_depth: Ground-truth lower bound.
-        max_depth: Ground-truth upper bound.
-
-    Returns:
-        ``(metrics, scale)`` where ``scale`` is the factor applied (``1.0`` when
-        ``median_scale`` is off).
-    """
-    p = np.asarray(pred, np.float64)
-    g = np.asarray(gt, np.float64)
-    p, g = np.broadcast_arrays(p, g)
-    valid = (
-        np.isfinite(p)
-        & np.isfinite(g)
-        & (p > _EPS)
-        & (g > float(min_depth))
-        & (g < float(max_depth))
-    )
-    if mask is not None:
-        valid &= np.asarray(mask, bool).reshape(g.shape)
-
-    scale = 1.0
-    if median_scale and valid.any():
-        scale = float(np.median(g[valid] / p[valid]))
-    return depth_metrics(p * scale, g, mask=mask, min_depth=min_depth, max_depth=max_depth), scale
 
 
 def aligned_depth_metrics(

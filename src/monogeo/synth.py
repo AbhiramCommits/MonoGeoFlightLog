@@ -44,7 +44,6 @@ Conventions
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from collections.abc import Sequence as TypingSequence
 from dataclasses import dataclass, field
 
@@ -121,11 +120,6 @@ class GroundField:
     marker_xz: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
     marker_core_m: float = 0.55
     marker_ring_m: float = 1.25
-
-    @property
-    def relief_scale(self) -> float:
-        """Height multiplier including the far-field damping."""
-        return self.relief_amplitude
 
     def _fractal(self, x: np.ndarray, z: np.ndarray, lattices: list[np.ndarray]) -> np.ndarray:
         """Normalised sum of octaves."""
@@ -917,14 +911,3 @@ def render_checkerboard_views(
     grid[:, 0] = gi.ravel() * square_size
     grid[:, 1] = gj.ravel() * square_size
     return images, grid, centers
-
-
-def frame_shape(size: tuple[int, int]) -> TypingSequence[int]:
-    """Return ``(height, width, 3)`` for a given ``(height, width)`` size."""
-    return (int(size[0]), int(size[1]), 3)
-
-
-def iter_pairs(n: int) -> Iterable[tuple[int, int, int]]:
-    """Yield ``(target, source_prev, source_next)`` index triplets for ``n`` frames."""
-    for i in range(1, n - 1):
-        yield i, i - 1, i + 1

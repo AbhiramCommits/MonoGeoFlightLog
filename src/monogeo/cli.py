@@ -24,9 +24,9 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-__all__ = ["build_parser", "main", "load_config", "save_json", "set_threads"]
+__all__ = ["build_parser", "load_config", "main", "save_json", "set_threads"]
 
 
 # --------------------------------------------------------------------------- #
@@ -301,7 +301,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(args.func(args) or 0)
     except NotImplementedError as exc:
-        print(f"[monogeo] {args.command}: not available in this build step ({exc})", file=sys.stderr)
+        print(
+            f"[monogeo] {args.command}: not available in this build step ({exc})", file=sys.stderr
+        )
         return 2
 
 

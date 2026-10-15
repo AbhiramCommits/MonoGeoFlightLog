@@ -158,12 +158,14 @@ Absolute values per corruption and severity:
 
 | implementation | mean (ms) | p50 (ms) | p95 (ms) | notes |
 |---|---|---|---|---|
-| Python (PyTorch) | 177.196 | 164.980 | 271.608 | 50 runs, torch threads 4 |
-| C++ (backend below) | 109.400 | 100.551 | 186.799 | 50 runs, backend cv::dnn (OpenCV 4.10.0), threads 4 |
+| Python (PyTorch) | 28.701 | 28.645 | 29.207 | 50 runs, torch threads 4 |
+| C++ (backend below) | 18.330 | 18.246 | 19.163 | 50 runs, backend cv::dnn (OpenCV 4.10.0), threads 4 |
 
-- speedup (Python mean / C++ mean): **1.620x**
-- max abs output difference: **1.52588000e-05** (parity threshold 0.001000)
-- mean abs output difference: 3.20400000e-07
+- ONNX Runtime on the same graph: mean 34.399 ms, p50 34.067 ms, p95 35.023 ms
+
+- speedup (Python mean / C++ mean): **1.566x**
+- max abs output difference: **2.09808000e-05** (parity threshold 0.001000)
+- mean abs output difference: 3.50700000e-07
 
 ### Training convergence
 

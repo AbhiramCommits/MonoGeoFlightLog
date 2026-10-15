@@ -73,6 +73,7 @@ def ssim(x: torch.Tensor, y: torch.Tensor, window_size: int = 3) -> torch.Tensor
     hw = x.shape[-2:]
 
     def filt(z: torch.Tensor) -> torch.Tensor:
+        """Smooth each channel independently and restore the batch/channel shape."""
         return F.conv2d(z.reshape(-1, 1, *hw), win, padding=pad).reshape(b, c, *hw)
 
     mu_x = filt(x)

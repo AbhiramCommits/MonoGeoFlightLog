@@ -645,7 +645,14 @@ def splits(seq: Sequence, held_out_fraction: float = 0.7) -> tuple[list[int], li
 
 
 def to_tensor(array: np.ndarray) -> torch.Tensor:
-    """Convert a numpy array to a contiguous float32 tensor."""
+    """Convert a numpy array to a contiguous float32 tensor.
+
+    Args:
+        array: Any numpy array.
+
+    Returns:
+        A float32 tensor sharing no memory with ``array``.
+    """
     return torch.from_numpy(np.ascontiguousarray(array)).float()
 
 
@@ -724,6 +731,7 @@ class SequenceDataset(Dataset):
         seq = self.sequence
 
         def frame(idx: int) -> np.ndarray:
+            """Frame ``idx`` as ``(H, W, 3)`` float32 in ``[0, 1]``."""
             return seq.frames[idx].astype(np.float32) / 255.0
 
         target = frame(i)
@@ -755,7 +763,3 @@ class SequenceDataset(Dataset):
             "rel_poses": to_tensor(rel),
             "index": int(i),
         }
-
-    def frame_indices(self) -> list[int]:
-        """Return the target frame indices covered by this dataset."""
-        return list(self.indices)

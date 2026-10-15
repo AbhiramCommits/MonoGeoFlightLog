@@ -16,29 +16,27 @@ problem, and the recovered factor is reported as a headline number.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import cv2
 import numpy as np
 
-from . import synth
 from .cli import cfg_get, save_json
 
 __all__ = [
     "FeatureMatches",
     "TwoViewResult",
-    "match_features",
-    "estimate_pose",
-    "triangulate",
-    "reprojection_error",
-    "scale_from_gt",
-    "pose_error",
-    "rotation_error_deg",
-    "translation_angle_deg",
-    "relative_pose",
     "depth_from_triangulation",
+    "estimate_pose",
+    "match_features",
+    "pose_error",
+    "relative_pose",
+    "reprojection_error",
+    "rotation_error_deg",
     "run_two_view",
+    "scale_from_gt",
+    "translation_angle_deg",
+    "triangulate",
 ]
 
 
@@ -164,7 +162,9 @@ def match_features(
 
     bf = cv2.BFMatcher(norm)
     knn12 = bf.knnMatch(d1, d2, k=2)
-    good = [m for m, n in (pair for pair in knn12 if len(pair) == 2) if m.distance < ratio * n.distance]
+    good = [
+        m for m, n in (pair for pair in knn12 if len(pair) == 2) if m.distance < ratio * n.distance
+    ]
     if not good:
         return empty
 
@@ -366,9 +366,7 @@ def triangulate(
     n2 = np.linalg.norm(v2, axis=1)
     ok = n1 > 1e-12
     cosang = np.ones(len(X))
-    cosang[ok] = np.clip(
-        np.sum(v1[ok] * v2[ok], axis=1) / (n1[ok] * n2[ok]), -1.0, 1.0
-    )
+    cosang[ok] = np.clip(np.sum(v1[ok] * v2[ok], axis=1) / (n1[ok] * n2[ok]), -1.0, 1.0)
     parallax = np.degrees(np.arccos(cosang))
     good = front & (parallax >= float(min_parallax_deg))
 
@@ -416,7 +414,13 @@ def reprojection_error(
         ref = pts2 if view == "second" else pts1
 
     if len(points3d) == 0 or len(ref) == 0:
-        return {"mean": float("nan"), "median": float("nan"), "rms": float("nan"), "max": float("nan"), "n": 0}
+        return {
+            "mean": float("nan"),
+            "median": float("nan"),
+            "rms": float("nan"),
+            "max": float("nan"),
+            "n": 0,
+        }
 
     X = np.asarray(points3d, np.float64)
     if view == "second":
@@ -430,7 +434,13 @@ def reprojection_error(
     err = np.linalg.norm(proj - ref[: len(X)], axis=1)
     err = err[np.isfinite(err)]
     if err.size == 0:
-        return {"mean": float("nan"), "median": float("nan"), "rms": float("nan"), "max": float("nan"), "n": 0}
+        return {
+            "mean": float("nan"),
+            "median": float("nan"),
+            "rms": float("nan"),
+            "max": float("nan"),
+            "n": 0,
+        }
     return {
         "mean": float(err.mean()),
         "median": float(np.median(err)),
@@ -474,7 +484,12 @@ def scale_from_gt(
     X = np.asarray(points3d, np.float64)
     gt = np.asarray(gt_depth, np.float64)
     if X.size == 0:
-        return {"scale": float("nan"), "n": 0, "iqr": float("nan"), "median_abs_ratio": float("nan")}
+        return {
+            "scale": float("nan"),
+            "n": 0,
+            "iqr": float("nan"),
+            "median_abs_ratio": float("nan"),
+        }
 
     if points1 is not None:
         uv = np.asarray(points1, np.float64)
@@ -498,7 +513,12 @@ def scale_from_gt(
 
     r = ratios[np.isfinite(ratios)]
     if r.size == 0:
-        return {"scale": float("nan"), "n": 0, "iqr": float("nan"), "median_abs_ratio": float("nan")}
+        return {
+            "scale": float("nan"),
+            "n": 0,
+            "iqr": float("nan"),
+            "median_abs_ratio": float("nan"),
+        }
     q1, q3 = np.percentile(r, [25, 75])
     return {
         "scale": float(np.median(r)),
@@ -650,9 +670,7 @@ def evaluate_pair(
     import time
 
     t0 = time.perf_counter()
-    matches = match_features(
-        frames[i], frames[j], max_features=max_features, ratio=ratio
-    )
+    matches = match_features(frames[i], frames[j], max_features=max_features, ratio=ratio)
     out: dict[str, Any] = {
         "frame_pair": [int(i), int(j)],
         "matches": matches.to_dict(),
@@ -663,9 +681,7 @@ def evaluate_pair(
         out["runtime_ms"] = (time.perf_counter() - t0) * 1000.0
         return out
 
-    tv = estimate_pose(
-        matches, K, ransac_prob=ransac_prob, threshold_px=threshold_px
-    )
+    tv = estimate_pose(matches, K, ransac_prob=ransac_prob, threshold_px=threshold_px)
     pts3d, valid = triangulate(matches, K, tv.R, tv.t, mask=tv.inlier_mask)
 
     R_gt, t_gt = relative_pose(poses, i, j)
@@ -678,17 +694,14 @@ def evaluate_pair(
     # monocular pipeline does not have: report how much scale is missing.
     gt1 = depths[i]
     uv = matches.points1[valid] if valid.sum() == len(pts3d) else None
-    sc = (
-        scale_from_gt(pts3d, gt1, points1=uv)
-        if uv is not None
-        else scale_from_gt(pts3d, gt1, K=K)
-    )
+    sc = scale_from_gt(pts3d, gt1, points1=uv) if uv is not None else scale_from_gt(pts3d, gt1, K=K)
     gt_baseline = float(np.linalg.norm(t_gt))
-    scale_corrected_rot = rotation_error_deg(tv.R, R_gt)
+    rotation_error_deg(tv.R, R_gt)
 
     # A depth map in metric units, for the depth metrics in step 4/5.
     depth_pred = depth_from_triangulation(
-        pts3d, matches.points1[valid] if valid.sum() == len(pts3d) else matches.points1[: len(pts3d)],
+        pts3d,
+        matches.points1[valid] if valid.sum() == len(pts3d) else matches.points1[: len(pts3d)],
         depths.shape[1:],
     )
 
@@ -776,8 +789,17 @@ def run_two_view(args: Any) -> int:
     per_pair = []
     for i, j in pairs:
         r = evaluate_pair(
-            seq.frames, seq.depths, seq.poses, seq.K, seq.dist, i, j,
-            max_features=max_features, ratio=ratio, ransac_prob=prob, threshold_px=thresh,
+            seq.frames,
+            seq.depths,
+            seq.poses,
+            seq.K,
+            seq.dist,
+            i,
+            j,
+            max_features=max_features,
+            ratio=ratio,
+            ransac_prob=prob,
+            threshold_px=thresh,
         )
         per_pair.append(r)
 
@@ -787,10 +809,12 @@ def run_two_view(args: Any) -> int:
         return 1
 
     def med(key: str) -> float:
+        """Median of a top-level field over the usable pairs."""
         vals = [r[key] for r in ok_pairs if r.get(key) is not None and np.isfinite(r[key])]
         return float(np.median(vals)) if vals else float("nan")
 
     def med_nested(outer: str, key: str) -> float:
+        """Median of ``record[outer][key]`` over the usable pairs."""
         vals = []
         for r in ok_pairs:
             v = r.get(outer, {}).get(key)

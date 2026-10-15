@@ -158,6 +158,7 @@ def _aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         return {}
 
     def collect(path: str) -> list[float]:
+        """Gather one (possibly nested) field from every record, skipping non-finite ones."""
         out = []
         for r in records:
             cur: Any = r

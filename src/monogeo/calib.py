@@ -15,9 +15,9 @@ from "the parameters are not identifiable".
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import cv2
 import numpy as np
@@ -134,9 +134,7 @@ def calibrate_from_checkerboards(
             continue
         corners = np.asarray(corners, np.float32).reshape(-1, 1, 2)
         if refine_subpix:
-            corners = cv2.cornerSubPix(
-                gray, corners, (5, 5), (-1, -1), criteria
-            )
+            corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
         objpoints.append(objp)
         imgpoints.append(corners)
         used.append(i)
@@ -155,7 +153,7 @@ def calibrate_from_checkerboards(
     # Per-view RMS reprojection error, computed explicitly rather than trusting
     # the aggregate OpenCV returns.
     per_view = np.zeros(len(objpoints), np.float64)
-    for i, (op, ip, rvec, tvec) in enumerate(zip(objpoints, imgpoints, rvecs, tvecs)):
+    for i, (op, ip, rvec, tvec) in enumerate(zip(objpoints, imgpoints, rvecs, tvecs, strict=False)):
         proj, _ = cv2.projectPoints(op, rvec, tvec, K, dist)
         err = np.linalg.norm(proj.reshape(-1, 2) - ip.reshape(-1, 2), axis=1)
         per_view[i] = float(np.sqrt(np.mean(err**2)))
@@ -258,11 +256,12 @@ def calibration_report(
     true = np.array([K_true[0, 0], K_true[1, 1], K_true[0, 2], K_true[1, 2]])
 
     intrinsics = {
-        "estimated": {n: float(v) for n, v in zip(names, est)},
-        "true": {n: float(v) for n, v in zip(names, true)},
-        "abs_error_px": {n: float(v) for n, v in zip(names, np.abs(est - true))},
+        "estimated": {n: float(v) for n, v in zip(names, est, strict=False)},
+        "true": {n: float(v) for n, v in zip(names, true, strict=False)},
+        "abs_error_px": {n: float(v) for n, v in zip(names, np.abs(est - true), strict=False)},
         "rel_error_pct": {
-            n: float(100.0 * abs(e - t) / t) if t else 0.0 for n, e, t in zip(names, est, true)
+            n: float(100.0 * abs(e - t) / t) if t else 0.0
+            for n, e, t in zip(names, est, true, strict=False)
         },
     }
 
@@ -272,9 +271,11 @@ def calibration_report(
         "focal_mean_abs_error_px": float(np.mean(np.abs(est[:2] - true[:2]))),
         "principal_point_mean_abs_error_px": float(np.mean(np.abs(est[2:] - true[2:]))),
         "distortion": {
-            "estimated": {n: float(v) for n, v in zip(dnames, d_est)},
-            "true": {n: float(v) for n, v in zip(dnames, d_true)},
-            "abs_error": {n: float(v) for n, v in zip(dnames, np.abs(d_est - d_true))},
+            "estimated": {n: float(v) for n, v in zip(dnames, d_est, strict=False)},
+            "true": {n: float(v) for n, v in zip(dnames, d_true, strict=False)},
+            "abs_error": {
+                n: float(v) for n, v in zip(dnames, np.abs(d_est - d_true), strict=False)
+            },
         },
         "distortion_max_abs_coeff_error": float(np.max(np.abs(d_est - d_true))),
     }
@@ -308,7 +309,9 @@ def run_calibrate(args: Any) -> int:
         Process exit code (0 on success).
     """
     cfg = getattr(args, "cfg", {}) or {}
-    image_size = tuple(getattr(args, "image_size", None) or cfg_get(cfg, "calib.image_size", [480, 640]))
+    image_size = tuple(
+        getattr(args, "image_size", None) or cfg_get(cfg, "calib.image_size", [480, 640])
+    )
     height, width = int(image_size[0]), int(image_size[1])
     pattern = tuple(cfg_get(cfg, "calib.checkerboard", [6, 7]))
     rows, cols = int(pattern[0]), int(pattern[1])
@@ -316,12 +319,20 @@ def run_calibrate(args: Any) -> int:
     num_views = int(getattr(args, "views", None) or cfg_get(cfg, "calib.num_views", 20))
     seed = int(getattr(args, "seed", 0) or 0)
     fov = float(cfg_get(cfg, "synth.fov_deg", 62.0))
-    dist_true = np.asarray(cfg_get(cfg, "synth.distortion", synth.DEFAULT_DIST.tolist()), np.float64)
+    dist_true = np.asarray(
+        cfg_get(cfg, "synth.distortion", synth.DEFAULT_DIST.tolist()), np.float64
+    )
 
     K_true = synth.default_intrinsics(width, height, fov)
-    images, objp, _ = synth.render_checkerboard_views(
-        K_true, dist_true, n=num_views, size=(height, width),
-        rows=rows, cols=cols, square_size=square_size, seed=seed,
+    images, _objp, _ = synth.render_checkerboard_views(
+        K_true,
+        dist_true,
+        n=num_views,
+        size=(height, width),
+        rows=rows,
+        cols=cols,
+        square_size=square_size,
+        seed=seed,
     )
 
     result = calibrate_from_checkerboards(images, pattern=(rows, cols), square_size=square_size)
@@ -365,6 +376,8 @@ def run_calibrate(args: Any) -> int:
     print(f"[calibrate] distortion coeff error {report['distortion']['estimated']}")
     disp = report.get("distortion_field_displacement_px")
     if disp:
-        print(f"[calibrate] distortion field displacement mean {disp['mean']:.4f} px, max {disp['max']:.4f} px")
+        print(
+            f"[calibrate] distortion field displacement mean {disp['mean']:.4f} px, max {disp['max']:.4f} px"
+        )
     print(f"[calibrate] wrote {out}")
     return 0
