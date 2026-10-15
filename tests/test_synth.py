@@ -31,9 +31,7 @@ def test_rendered_frames_are_not_degenerate() -> None:
     K = synth.default_intrinsics(SMALL[1], SMALL[0], 62.0)
     scene = synth.make_scene(0)
     poses = synth.make_trajectory("forward", n=4)
-    frames, depths, out_poses = synth.render_sequence(
-        scene, poses, K, synth.DEFAULT_DIST, SMALL
-    )
+    frames, depths, out_poses = synth.render_sequence(scene, poses, K, synth.DEFAULT_DIST, SMALL)
 
     assert frames.shape == (4, SMALL[0], SMALL[1], 3)
     assert frames.dtype == np.uint8
@@ -84,10 +82,11 @@ def test_gt_projection_matches_renderer_pixels() -> None:
     scene = synth.make_scene(2)
     pose = synth.make_trajectory("forward", n=1)[0]
 
-    _, _, pix, keep = synth.render_frame(scene, pose, K, dist, (96, 320), splat=2)
-    assert keep.sum() > 1000
+    _, _, pix, points, _ = synth.render_frame(scene, pose, K, dist, (96, 320), splat=2)
+    assert points.shape[0] > 1000
+    assert pix.shape[0] == points.shape[0]
 
-    X = scene.points[keep].astype(np.float64)
+    X = points.astype(np.float64)
     R = pose[:3, :3]
     t = pose[:3, 3]
     Xc = X @ R.T + t
@@ -112,6 +111,26 @@ def test_gt_projection_matches_renderer_pixels() -> None:
     # and within 1 px of the *quantised* pixel that the renderer splatted
     qerr = np.linalg.norm(proj - np.rint(pix), axis=1)
     assert qerr.max() < 1.0, f"quantised projection mismatch: max {qerr.max():.3f} px"
+
+
+def test_long_sequence_keeps_near_full_depth_coverage() -> None:
+    """Every frame of a long flight must still have terrain in it.
+
+    Regression test: an earlier renderer pre-sampled the ground from a few fixed
+    anchors, so a camera that had flown past them saw its *near* field full of
+    holes and, past about frame 100, a completely empty frame. The per-frame
+    terrain raycast removes the failure mode; this test keeps it removed.
+    """
+    K = synth.default_intrinsics(416, 128, 62.0)
+    scene = synth.make_scene(0)
+    for kind in ("forward", "descent"):
+        poses = synth.make_trajectory(kind, n=40)
+        frames, depths, _ = synth.render_sequence(scene, poses, K, synth.DEFAULT_DIST, (128, 416))
+        coverage = np.array([(depths[i] > 0).mean() for i in range(len(depths))])
+        assert coverage.min() > 0.9, f"{kind}: coverage dropped to {coverage.min():.3f}"
+        for i in range(0, len(frames), 8):
+            assert frames[i].std() > 5.0, f"{kind} frame {i} is degenerate"
+            assert np.median(depths[i][depths[i] > 0]) > 2.0
 
 
 def test_lookat_pose_is_rigid_and_correct() -> None:
@@ -187,6 +206,8 @@ def test_load_sequence_and_dataset(kind: str, tmp_path) -> None:
 
 def test_dataset_rejects_too_short_sequence(tmp_path) -> None:
     """A 2-frame sequence cannot supply +/-1 neighbours."""
-    seq = load_sequence("forward", size=SMALL, num_frames=2, root=tmp_path, cache=False, verbose=False)
+    seq = load_sequence(
+        "forward", size=SMALL, num_frames=2, root=tmp_path, cache=False, verbose=False
+    )
     with pytest.raises(ValueError):
         SequenceDataset(seq, frame_ids=(0, -1, 1))

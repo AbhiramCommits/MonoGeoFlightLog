@@ -13,9 +13,11 @@ rendering is the only slow part of dataset construction.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+from collections.abc import Sequence as TypingSequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Sequence as TypingSequence
+from typing import Any
 
 import numpy as np
 import torch
@@ -24,10 +26,12 @@ from torch.utils.data import Dataset
 from . import synth
 
 __all__ = [
+    "SYNTHETIC_KINDS",
     "Sequence",
     "SequenceDataset",
     "load_sequence",
-    "SYNTHETIC_KINDS",
+    "slice_sequence",
+    "splits",
     "to_tensor",
 ]
 
@@ -85,7 +89,7 @@ class Sequence:
         """Frame width in pixels."""
         return int(self.frames.shape[2])
 
-    def dataset(self, **kwargs: Any) -> "SequenceDataset":
+    def dataset(self, **kwargs: Any) -> SequenceDataset:
         """Wrap this sequence in a :class:`SequenceDataset`."""
         return SequenceDataset(self, **kwargs)
 
@@ -109,7 +113,9 @@ class Sequence:
 # --------------------------------------------------------------------------- #
 # synthetic sequences
 # --------------------------------------------------------------------------- #
-def _cache_path(root: Path, name: str, size: tuple[int, int], n: int, seed: int, fov: float) -> Path:
+def _cache_path(
+    root: Path, name: str, size: tuple[int, int], n: int, seed: int, fov: float
+) -> Path:
     return root / "cache" / f"synth_{name}_{size[0]}x{size[1]}_n{n}_s{seed}_f{fov:g}.npz"
 
 
@@ -339,8 +345,9 @@ def load_euroc(
     Raises:
         FileNotFoundError: If the expected EuRoC files are missing.
     """
-    import cv2
     import csv
+
+    import cv2
 
     root = Path(root)
     seq_dir = root / str(sequence) / "mav0"
@@ -551,10 +558,14 @@ def load_sequence(
     poses = synth.make_trajectory(
         name,
         n=num_frames,
-        **({} if speed is None and altitude is None else {
-            **({"speed": speed} if speed is not None else {}),
-            **({"altitude": altitude} if altitude is not None else {}),
-        }),
+        **(
+            {}
+            if speed is None and altitude is None
+            else {
+                **({"speed": speed} if speed is not None else {}),
+                **({"altitude": altitude} if altitude is not None else {}),
+            }
+        ),
     )
     frames, depths, poses = synth.render_sequence(scene, poses, K, dist_vec, (height, width))
     if verbose:
@@ -574,6 +585,65 @@ def load_sequence(
 # --------------------------------------------------------------------------- #
 # dataset
 # --------------------------------------------------------------------------- #
+def slice_sequence(seq: Sequence, start: int = 0, stop: int | None = None) -> Sequence:
+    """Return a new :class:`Sequence` covering frames ``[start, stop)``.
+
+    Poses are absolute world->camera transforms, so slicing a trajectory keeps
+    every relative pose between the retained frames exact. That makes a
+    held-out *frame* split of one flight a legitimate evaluation set.
+
+    Args:
+        seq: Source sequence.
+        start: First frame index to keep.
+        stop: Exclusive end index; defaults to the end of the sequence.
+
+    Returns:
+        A sliced :class:`Sequence` with the same intrinsics and distortion.
+
+    Raises:
+        ValueError: If the requested range is empty or out of bounds.
+    """
+    n = len(seq)
+    lo = int(start)
+    hi = n if stop is None else int(stop)
+    lo = max(0, min(lo, n))
+    hi = max(0, min(hi, n))
+    if hi - lo < 1:
+        raise ValueError(f"empty slice [{lo}, {hi}) of a {n}-frame sequence")
+    meta = dict(seq.meta)
+    meta["slice"] = [lo, hi]
+    meta["parent_frames"] = n
+    return Sequence(
+        name=f"{seq.name}[{lo}:{hi}]",
+        source=seq.source,
+        frames=seq.frames[lo:hi],
+        depths=seq.depths[lo:hi],
+        poses=seq.poses[lo:hi],
+        K=seq.K,
+        dist=seq.dist,
+        meta=meta,
+    )
+
+
+def splits(seq: Sequence, held_out_fraction: float = 0.7) -> tuple[list[int], list[int]]:
+    """Split a sequence's frame indices into ``(train, held_out)``.
+
+    Args:
+        seq: Sequence to split.
+        held_out_fraction: Fraction of frames (from the front) used for training.
+
+    Returns:
+        ``(train_indices, held_out_indices)`` where the held-out indices are the
+        tail of the sequence. The boundary frame is dropped from the held-out
+        side so that no training frame is adjacent to it.
+    """
+    n = len(seq)
+    cut = max(2, min(n - 1, int(round(float(held_out_fraction) * n))))
+    train = list(range(1, cut))
+    held = list(range(cut + 1, n - 1))
+    return train, held
+
+
 def to_tensor(array: np.ndarray) -> torch.Tensor:
     """Convert a numpy array to a contiguous float32 tensor."""
     return torch.from_numpy(np.ascontiguousarray(array)).float()
@@ -632,11 +702,7 @@ class SequenceDataset(Dataset):
         if indices is not None:
             valid = [int(i) for i in indices if 0 <= int(i) < n]
         else:
-            valid = [
-                i
-                for i in range(n)
-                if all(0 <= i + f < n for f in self.frame_ids)
-            ]
+            valid = [i for i in range(n) if all(0 <= i + f < n for f in self.frame_ids)]
         if max_samples is not None:
             valid = valid[: int(max_samples)]
         self.indices = valid
@@ -670,7 +736,9 @@ class SequenceDataset(Dataset):
         inv_K = np.linalg.inv(K)
 
         pose = np.asarray(seq.poses[i], np.float64)
-        source_poses = np.stack([np.asarray(seq.poses[i + f], np.float64) for f in self.sources_ids], 0)
+        source_poses = np.stack(
+            [np.asarray(seq.poses[i + f], np.float64) for f in self.sources_ids], 0
+        )
         # target->source rigid transform: X_src = T_rel @ X_target
         rel = np.stack([sp @ np.linalg.inv(pose) for sp in source_poses], 0)
 

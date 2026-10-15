@@ -14,13 +14,17 @@ data:
   # Which sequence the *default* CLI runs use. One of forward | orbit | descent,
   # or a real dataset spec such as "kitti:00" / "euroc:MH_01_easy".
   sequence: forward
-  # Held-out sequence used for evaluation (never trained on).
-  eval_sequence: orbit
-  # Domain-shift sequence (altitude change between train and test distributions).
+  # Evaluation uses the held-out *tail* of the training sequence: the last
+  # (1 - held_out_fraction) of the frames are never trained on, and because
+  # poses are stored in the world frame every relative pose between them is
+  # exact, so this is a legitimate unseen-frame split.
+  # Domain-shift sequences (different viewing geometry / altitude regime).
   shift_sequence: descent
+  orbit_sequence: orbit
   height: 128
   width: 416
-  num_frames: 48
+  # Long enough to give a few hundred training triplets without a long render.
+  num_frames: 120
   # Frames rendered/generated per second of flight log is irrelevant here; the
   # trajectory is parameterised in metres per frame instead.
   synth_seed: 0
@@ -64,9 +68,11 @@ depth:
   frame_ids: [0, -1, 1]
 
 train_depth:
-  epochs: 8
+  # ~21 optimizer steps per epoch at batch 4 => ~250 steps. On an idle 4-thread
+  # CPU that is about 4 minutes at 128x416.
+  epochs: 12
   batch_size: 4
-  lr: 0.0001
+  lr: 0.0003
   num_workers: 0
   log_every: 1
   # Monodepth2 loss weights.
@@ -91,16 +97,21 @@ pointmap:
   pretrained_path: null
 
 train_pointmap:
-  epochs: 12
+  epochs: 15
   batch_size: 2
   lr: 0.0003
   num_workers: 0
-  conf_weight: true
-  lr_scale: 0.1
+  # DUSt3R confidence regulariser: conf* = alpha / residual
+  conf_reg: 0.2
+  gap: 1
   max_samples: 160
   out_dir: runs/pointmap
 
 eval:
+  # Fraction of frames (from the front) used for training; the rest is held out.
+  held_out_fraction: 0.7
+  # Cap the number of held-out pairs scored (keeps CPU cost bounded).
+  max_pairs: 24
   # Depth range masking for the standard metrics.
   min_depth: 1.0
   max_depth: 120.0
@@ -108,6 +119,8 @@ eval:
   num_frames: 40
 
 stress:
+  # The stress grid is methods x corruptions x severities, so keep it small.
+  max_pairs: 12
   corruptions: [motion_blur, low_texture, low_light, jpeg_artifacts]
   severities: [1, 2, 3]
 

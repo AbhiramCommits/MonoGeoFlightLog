@@ -1,137 +1,358 @@
 """Deterministic synthetic flight-log renderer.
 
 The renderer exists so that the whole repository runs offline on CPU while still
-producing *exactly* known ground truth: a procedural texture is baked onto a
-dense 3D point cloud (a noisy ground plane plus a handful of boxes with known
-heights), the cloud is projected with the pinhole model ``x = K [R|t] X`` and
-splatted with a z-buffer, and radial-tangential distortion is applied with the
-same forward model that :func:`cv2.undistort` inverts.
+producing *exactly* known ground truth. Its design is driven by one requirement:
+ground-truth depth must be trustworthy, because everything downstream (the
+self-supervised photometric loss, the pointmap supervision, every metric) is
+trained or scored against it.
+
+Three decisions follow from that:
+
+1. **The terrain is an analytic function of world position.** Height and texture
+   are fractal value noise defined on lattices over a fixed world rectangle and
+   *sampled* at world coordinates (:class:`GroundField`). An index-space noise
+   field would give different values at the same world point depending on which
+   sampling grid asked for it, so overlapping samples would disagree and produce
+   a double surface.
+2. **Each frame ray-casts its own ground samples.** For every camera pose the
+   renderer casts one ray per pixel onto the terrain and takes the intersection.
+   Sampling density is therefore constant in *pixels*, whatever the camera is
+   doing, so depth maps are hole-free without needing millions of points. (An
+   earlier version pre-sampled the ground from fixed anchors; a camera far from
+   an anchor saw that ground patch at a much shorter range than the anchor did,
+   which left the near field full of holes -- and late frames of a long flight
+   entirely empty.)
+3. **Occlusion uses a lexicographic z-buffer.** Every point is expanded to a
+   square footprint and all resulting samples are sorted by ``(pixel, depth)``;
+   the first entry per pixel is the nearest one. A naive per-offset painter's
+   algorithm lets a far sample overwrite a nearer one and silently corrupts the
+   ground-truth depth.
+
+Radial-tangential distortion is applied with the same forward model that
+:func:`cv2.undistort` inverts, so calibration has something real to recover.
 
 Conventions
 -----------
 * World frame: ``+X`` right, ``+Y`` **up**, ``+Z`` forward. The ground plane is
-  ``Y = 0`` and the aircraft flies above it.
+  ``Y = 0`` with a relief of about +/- 1 m.
 * Camera frame follows OpenCV: ``+X`` right, ``+Y`` **down**, ``+Z`` forward.
   Poses are 4x4 ``world -> camera`` matrices, so ``X_cam = R @ X_world + t``.
 * Distortion coefficients are ordered ``[k1, k2, p1, p2, k3]`` (OpenCV order).
-* Ground-truth depth maps store camera-frame ``Z`` in metres (Monodepth2
-  convention), with ``0`` marking pixels that received no point.
+* Ground-truth depth maps store camera-frame ``Z`` in metres (the Monodepth2
+  convention), with ``0`` marking pixels that received no sample.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Sequence as TypingSequence
+from collections.abc import Iterable
+from collections.abc import Sequence as TypingSequence
+from dataclasses import dataclass, field
 
 import numpy as np
 
 __all__ = [
+    "DEFAULT_DIST",
+    "WORLD_EXTENT",
+    "GroundField",
     "Scene",
+    "default_intrinsics",
+    "distort_normalized",
+    "lookat_pose",
+    "make_checkerboard_points",
     "make_scene",
     "make_trajectory",
-    "distort_normalized",
     "project_points",
+    "render_checkerboard_views",
     "render_frame",
     "render_sequence",
-    "render_checkerboard_views",
-    "default_intrinsics",
-    "default_distortion",
-    "DEFAULT_DIST",
 ]
 
 #: A realistic-but-recoverable radial-tangential distortion vector, OpenCV order.
 DEFAULT_DIST = np.array([-0.12, 0.03, 0.0012, -0.0008, 0.0], dtype=np.float64)
 
+#: World rectangle ``(x_min, x_max, z_min, z_max)`` spanned by the noise lattices.
+WORLD_EXTENT = (-220.0, 220.0, -80.0, 620.0)
+
 
 # --------------------------------------------------------------------------- #
-# noise helpers
+# analytic terrain
 # --------------------------------------------------------------------------- #
-def _value_noise(shape: tuple[int, int], rng: np.random.Generator, res: int) -> np.ndarray:
-    """Bilinearly-upsampled uniform noise on a ``res x res`` lattice.
+def _sample_lattice(
+    x: np.ndarray,
+    z: np.ndarray,
+    lat: np.ndarray,
+    extent: tuple[float, float, float, float],
+) -> np.ndarray:
+    """Bilinearly sample a lattice at world ``(x, z)`` coordinates."""
+    x0, x1, z0, z1 = extent
+    u = np.clip((x - x0) / (x1 - x0), 0.0, 1.0) * (lat.shape[1] - 1)
+    v = np.clip((z - z0) / (z1 - z0), 0.0, 1.0) * (lat.shape[0] - 1)
+    iu = np.clip(np.floor(u).astype(np.int64), 0, lat.shape[1] - 2)
+    iv = np.clip(np.floor(v).astype(np.int64), 0, lat.shape[0] - 2)
+    fu = (u - iu).astype(np.float32)
+    fv = (v - iv).astype(np.float32)
+    a = lat[iv, iu]
+    b = lat[iv, iu + 1]
+    c = lat[iv + 1, iu]
+    d = lat[iv + 1, iu + 1]
+    top = a * (1.0 - fu) + b * fu
+    bot = c * (1.0 - fu) + d * fu
+    return top * (1.0 - fv) + bot * fv
+
+
+@dataclass
+class GroundField:
+    """An analytic fractal terrain: height and colour as functions of ``(x, z)``.
+
+    Attributes:
+        extent: World rectangle the lattices span.
+        height_lattices: One lattice per octave, coarse to fine.
+        tex_lattices: One lattice per octave for the surface colour.
+        relief_amplitude: Peak-to-trough height relief in metres.
+        marker_xz: ``(N, 2)`` world positions of painted ground-control markers.
+        marker_core_m: Radius of a marker's bright core, in metres.
+        marker_ring_m: Outer radius of a marker's dark ring, in metres.
+    """
+
+    extent: tuple[float, float, float, float]
+    height_lattices: list[np.ndarray]
+    tex_lattices: list[np.ndarray]
+    relief_amplitude: float = 2.2
+    marker_xz: np.ndarray = field(default_factory=lambda: np.zeros((0, 2)))
+    marker_core_m: float = 0.55
+    marker_ring_m: float = 1.25
+
+    @property
+    def relief_scale(self) -> float:
+        """Height multiplier including the far-field damping."""
+        return self.relief_amplitude
+
+    def _fractal(self, x: np.ndarray, z: np.ndarray, lattices: list[np.ndarray]) -> np.ndarray:
+        """Normalised sum of octaves."""
+        acc = np.zeros(x.shape, np.float32)
+        amp, total = 1.0, 0.0
+        for lat in lattices:
+            acc += amp * _sample_lattice(x, z, lat, self.extent)
+            total += amp
+            amp *= 0.6
+        return np.clip(acc / total, 0.0, 1.0)
+
+    def height(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Terrain height at world ``(x, z)``, in metres.
+
+        Args:
+            x: World ``x`` coordinates (any shape).
+            z: World ``z`` coordinates, same shape as ``x``.
+
+        Returns:
+            Height in metres, same shape as ``x``.
+        """
+        h = self.relief_amplitude * (self._fractal(x, z, self.height_lattices) - 0.5)
+        # Damp the relief far away so the horizon stays tidy.
+        h = h * np.exp(-(((z - 90.0) / 260.0) ** 2)).astype(np.float32)
+        return h.astype(np.float32)
+
+    def color(self, x: np.ndarray, z: np.ndarray) -> np.ndarray:
+        """Surface colour at world ``(x, z)`` as ``(..., 3)`` float32 RGB.
+
+        Args:
+            x: World ``x`` coordinates (any shape).
+            z: World ``z`` coordinates, same shape as ``x``.
+
+        Returns:
+            ``x.shape + (3,)`` float32 RGB in ``[0, 1]``.
+        """
+        tex = self._fractal(x, z, self.tex_lattices)
+        ripple = (0.15 * np.sin(0.9 * x + 0.35 * z) * np.sin(0.31 * z - 0.17 * x)).astype(
+            np.float32
+        )
+        tex = np.clip(tex + ripple, 0.0, 1.0)
+
+        if self.marker_xz.size:
+            from scipy.spatial import cKDTree
+
+            flat_x = np.asarray(x, np.float32).ravel()
+            flat_z = np.asarray(z, np.float32).ravel()
+            dist, _ = cKDTree(self.marker_xz).query(np.column_stack([flat_x, flat_z]))
+            core = (dist < self.marker_core_m).reshape(tex.shape)
+            ring = ((dist >= self.marker_core_m) & (dist < self.marker_ring_m)).reshape(tex.shape)
+            tex = np.where(core, np.float32(0.99), tex)
+            tex = np.where(ring, np.float32(0.03), tex)
+
+        # Lambertian shading from a fixed sun, from analytic finite differences.
+        eps = 0.6
+        dvdx = (
+            self._fractal(x + eps, z, self.height_lattices)
+            - self._fractal(x - eps, z, self.height_lattices)
+        ) / (2 * eps)
+        dvdz = (
+            self._fractal(x, z + eps, self.height_lattices)
+            - self._fractal(x, z - eps, self.height_lattices)
+        ) / (2 * eps)
+        n = np.stack(
+            [-self.relief_amplitude * dvdx, np.ones_like(dvdx), -self.relief_amplitude * dvdz], -1
+        ).astype(np.float32)
+        n /= np.linalg.norm(n, axis=-1, keepdims=True)
+        sun = np.array([0.35, 0.86, -0.37], np.float32)
+        sun /= np.linalg.norm(sun)
+        shade = 0.45 + 0.55 * np.clip(n @ sun, 0.0, 1.0)
+
+        palette = np.stack(
+            [
+                0.25 + 0.75 * tex,
+                0.30 + 0.65 * (1.0 - np.abs(tex - 0.5) * 2.0),
+                0.20 + 0.70 * (1.0 - tex),
+            ],
+            -1,
+        )
+        tint = np.array([1.0, 0.98, 0.92], np.float32)
+        rgb = np.clip(palette * tint, 0.0, 1.0) * shade[..., None]
+        return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+    def raycast(
+        self,
+        origin: np.ndarray,
+        directions: np.ndarray,
+        max_range: float = 600.0,
+        iterations: int = 3,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Intersect world-space rays with the terrain.
+
+        Uses a fixed-point iteration starting from the ``y = 0`` plane: the
+        relief is only about a metre, so three iterations converge to well below
+        a pixel for the ranges involved.
+
+        Args:
+            origin: ``(3,)`` ray origin (the camera centre).
+            directions: ``(N, 3)`` unit-ish ray directions.
+            max_range: Rays that hit further than this are discarded.
+            iterations: Fixed-point iterations refining the intersection.
+
+        Returns:
+            ``(points, valid)``: ``(N, 3)`` world hit points (garbage where
+            invalid) and an ``(N,)`` boolean mask for rays that hit the terrain
+            in front of the camera.
+        """
+        o = np.asarray(origin, np.float64)
+        d = np.asarray(directions, np.float64)
+        dy = d[:, 1]
+        valid = dy < -1e-6
+        t = np.zeros(d.shape[0], np.float64)
+        t[valid] = -o[1] / dy[valid]
+        for _ in range(int(iterations)):
+            p = o[None, :] + t[:, None] * d
+            h = self.height(p[:, 0].astype(np.float32), p[:, 2].astype(np.float32)).astype(
+                np.float64
+            )
+            t_new = (h - o[1]) / dy
+            t = np.where(valid, (t + t_new) * 0.5, 0.0)
+        p = o[None, :] + t[:, None] * d
+        valid &= t > 0.1
+        valid &= t < float(max_range)
+        return p, valid
+
+
+def make_ground_field(seed: int, n_markers: int | None = None) -> GroundField:
+    """Build the deterministic analytic terrain for a seed.
 
     Args:
-        shape: ``(height, width)`` of the output field.
-        rng: Seeded generator; consumption order defines determinism.
-        res: Lattice resolution in samples per axis.
+        seed: Master seed for the lattices.
+        n_markers: Number of painted ground-control markers (random in
+            ``[140, 200]`` when ``None``).
 
     Returns:
-        Float32 array of ``shape`` with values in ``[0, 1]``.
+        A :class:`GroundField`.
     """
-    from scipy.ndimage import zoom
-
-    h, w = shape
-    res = max(2, int(res))
-    grid = rng.random((res, res)).astype(np.float32)
-    up = zoom(grid, (h / res, w / res), order=1)
-    out = np.zeros((h, w), np.float32)
-    hh = min(h, up.shape[0])
-    ww = min(w, up.shape[1])
-    out[:hh, :ww] = up[:hh, :ww]
-    if hh < h:
-        out[hh:, :] = out[hh - 1 : hh, :]
-    if ww < w:
-        out[:, ww:] = out[:, ww - 1 : ww]
-    return np.clip(out, 0.0, 1.0)
-
-
-def _fractal_noise(
-    shape: tuple[int, int],
-    rng: np.random.Generator,
-    octaves: int = 5,
-    base: int = 4,
-    persistence: float = 0.55,
-) -> np.ndarray:
-    """Sum of ``octaves`` value-noise octaves, normalised to ``[0, 1]``."""
-    acc = np.zeros(shape, np.float32)
-    amp, total = 1.0, 0.0
-    for o in range(octaves):
-        acc += amp * _value_noise(shape, rng, base * 2**o)
-        total += amp
-        amp *= persistence
-    return np.clip(acc / total, 0.0, 1.0)
+    rng = np.random.default_rng(seed)
+    height_lattices = [rng.random((32 * 2**o, 16 * 2**o)).astype(np.float32) for o in range(5)]
+    tex_lattices = [rng.random((48 * 2**o, 24 * 2**o)).astype(np.float32) for o in range(6)]
+    m_rng = np.random.default_rng(seed + 991)
+    n = int(n_markers) if n_markers is not None else int(m_rng.integers(140, 200))
+    marker_xz = np.column_stack(
+        [m_rng.uniform(-120.0, 120.0, n), m_rng.uniform(2.0, 400.0, n)]
+    ).astype(np.float32)
+    return GroundField(
+        extent=WORLD_EXTENT,
+        height_lattices=height_lattices,
+        tex_lattices=tex_lattices,
+        marker_xz=marker_xz,
+    )
 
 
 # --------------------------------------------------------------------------- #
-# scene construction
+# scene
 # --------------------------------------------------------------------------- #
 @dataclass
 class Scene:
-    """A textured 3D point cloud with exactly known camera-frame geometry.
+    """A textured world: an analytic terrain plus opaque box geometry.
 
     Attributes:
-        points: ``(N, 3)`` float32 world coordinates in metres.
-        colors: ``(N, 3)`` float32 linear RGB in ``[0, 1]``.
+        points: ``(N, 3)`` float32 world coordinates of the *fixed* geometry
+            (the boxes). Ground samples are generated per frame by
+            :meth:`raycast_ground`.
+        colors: ``(N, 3)`` float32 linear RGB in ``[0, 1]`` for ``points``.
         seed: Seed the scene was generated from.
-        meta: Free-form provenance (box heights, ground extent, ...).
+        ground: The analytic terrain, or ``None`` for a ground-free scene such
+            as the calibration target.
+        meta: Free-form provenance (box heights, relief, ...).
     """
 
     points: np.ndarray
     colors: np.ndarray
     seed: int
-    meta: dict
+    ground: GroundField | None = None
+    meta: dict = field(default_factory=dict)
 
     def __len__(self) -> int:
         return int(self.points.shape[0])
 
+    def raycast_ground(
+        self,
+        pose: np.ndarray,
+        K: np.ndarray,
+        size: tuple[int, int],
+        step: float = 1.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Sample the terrain on the image grid of one camera.
 
-def _palette(t: np.ndarray, tint: np.ndarray) -> np.ndarray:
-    """Map a scalar field ``t`` in ``[0, 1]`` to RGB multiplied by ``tint``."""
-    t = np.clip(t, 0.0, 1.0)
-    base = np.stack(
-        [
-            0.25 + 0.75 * t,
-            0.30 + 0.65 * (1.0 - np.abs(t - 0.5) * 2.0),
-            0.20 + 0.70 * (1.0 - t),
-        ],
-        axis=-1,
-    )
-    return np.clip(base * tint[None, :], 0.0, 1.0).astype(np.float32)
+        One ray is cast per ``step`` pixels of a regular grid over the image, so
+        the angular sample density is constant no matter where the camera is or
+        which way it is looking.
+
+        Args:
+            pose: ``(4, 4)`` world->camera transform.
+            K: ``(3, 3)`` intrinsics.
+            size: ``(height, width)`` of the image.
+            step: Pixel spacing of the sampling grid (``1.0`` = one ray per pixel).
+
+        Returns:
+            ``(points, colors)``: ``(M, 3)`` world points and ``(M, 3)`` RGB.
+        """
+        if self.ground is None:
+            return np.zeros((0, 3), np.float32), np.zeros((0, 3), np.float32)
+        height, width = int(size[0]), int(size[1])
+        pose = np.asarray(pose, np.float64)
+        R, t = pose[:3, :3], pose[:3, 3]
+        origin = -R.T @ t
+
+        us = np.arange(0.0, width, float(step))
+        vs = np.arange(0.0, height, float(step))
+        uu, vv = np.meshgrid(us, vs)
+        rays_cam = np.stack([uu.ravel(), vv.ravel(), np.ones(uu.size)], -1)
+        dirs_cam = rays_cam @ np.linalg.inv(np.asarray(K, np.float64)).T
+        dirs = dirs_cam @ R  # world directions (row-vector convention)
+        points, valid = self.ground.raycast(origin, dirs)
+        points = points[valid].astype(np.float32)
+        if points.shape[0] == 0:
+            return points, np.zeros((0, 3), np.float32)
+        colors = self.ground.color(points[:, 0], points[:, 2])
+        return points, colors.reshape(-1, 3).astype(np.float32)
 
 
 def _sample_box(
     center: np.ndarray,
     size: np.ndarray,
-    samples_per_meter: float = 3.0,
+    samples_per_meter: float = 6.0,
     rng: np.random.Generator | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Sample the surfaces of an axis-aligned box on a regular grid.
@@ -150,169 +371,110 @@ def _sample_box(
     hx, hy, hz = size / 2.0
     pts: list[np.ndarray] = []
     tex: list[np.ndarray] = []
-
-    def _grid(u: int, v: int) -> tuple[np.ndarray, np.ndarray]:
-        a = np.linspace(-1.0, 1.0, max(2, u))
-        b = np.linspace(-1.0, 1.0, max(2, v))
-        return np.meshgrid(a, b, indexing="ij")
-
     nu = [max(2, int(s * samples_per_meter)) for s in size]
 
-    # top face (y = +hy)
-    u, v = _grid(nu[0], nu[2])
-    pts.append(np.stack([center[0] + u.ravel() * hx, np.full(u.size, center[1] + hy), center[2] + v.ravel() * hz], 1))
-    tex.append(_value_noise((nu[0], nu[2]), rng, 6).ravel())
+    def _face(u: int, v: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        a = np.linspace(-1.0, 1.0, max(2, u))
+        b = np.linspace(-1.0, 1.0, max(2, v))
+        A, B = np.meshgrid(a, b, indexing="ij")
+        return A, B, rng.random((max(2, u), max(2, v))).astype(np.float32)
 
+    # top face
+    A, B, T = _face(nu[0], nu[2])
+    pts.append(
+        np.stack(
+            [
+                center[0] + A.ravel() * hx,
+                np.full(A.size, center[1] + hy),
+                center[2] + B.ravel() * hz,
+            ],
+            1,
+        )
+    )
+    tex.append(T.ravel())
     for axis, sign in ((0, +1), (0, -1), (2, +1), (2, -1)):
-        u, v = _grid(nu[0] if axis == 2 else nu[2], nu[1])
+        A, B, T = _face(nu[0] if axis == 2 else nu[2], nu[1])
         if axis == 0:
-            x = np.full(u.size, center[0] + sign * hx)
-            y = center[1] + u.ravel() * hy
-            z = center[2] + v.ravel() * hz
+            x = np.full(A.size, center[0] + sign * hx)
+            y = center[1] + A.ravel() * hy
+            z = center[2] + B.ravel() * hz
         else:
-            x = center[0] + u.ravel() * hx
-            y = center[1] + u.ravel() * hy
-            z = np.full(u.size, center[2] + sign * hz)
+            x = center[0] + A.ravel() * hx
+            y = center[1] + A.ravel() * hy
+            z = np.full(A.size, center[2] + sign * hz)
         pts.append(np.stack([x, y, z], 1))
-        tex.append(_value_noise((u.shape[0], u.shape[1]), rng, 6).ravel())
+        tex.append(T.ravel())
 
-    points = np.concatenate(pts, 0).astype(np.float32)
-    gray = np.concatenate(tex, 0).astype(np.float32)
-    return points, gray
+    return np.concatenate(pts, 0).astype(np.float32), np.concatenate(tex, 0).astype(np.float32)
 
 
-def make_scene(seed: int = 0, n_boxes: int = 6) -> Scene:
-    """Build a deterministic textured height-field scene.
+def _shade_box_colors(gray: np.ndarray, tint: np.ndarray) -> np.ndarray:
+    """Map per-sample box texture to RGB using the shared palette."""
+    palette = np.stack(
+        [
+            0.25 + 0.75 * gray,
+            0.30 + 0.65 * (1.0 - np.abs(gray - 0.5) * 2.0),
+            0.20 + 0.70 * (1.0 - gray),
+        ],
+        -1,
+    )
+    return np.clip(palette * tint[None, :], 0.0, 1.0).astype(np.float32)
 
-    The scene is a fractal-noise ground plane (amplitude ~2 m, so it is a real
-    height field rather than a flat card) plus ``n_boxes`` axis-aligned
-    buildings with known heights. Texture frequency is deliberately high so
-    SIFT/ORB find plenty of stable corners for the classical two-view baseline.
+
+def make_scene(seed: int = 0, n_boxes: int = 8) -> Scene:
+    """Build a deterministic textured scene: fractal terrain plus boxes.
 
     Args:
         seed: Seed for the procedural generator. Identical seeds give identical
-            point clouds bit-for-bit.
-        n_boxes: Number of boxes to place ahead of the camera.
+            terrain and box layouts.
+        n_boxes: Number of axis-aligned buildings to place along the corridor.
 
     Returns:
-        A :class:`Scene` whose ``points``/``colors`` fully define the geometry.
+        A :class:`Scene` whose terrain is analytic and whose boxes are a fixed
+        point set with exactly known heights.
     """
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(seed + 17)
+    ground = make_ground_field(seed)
 
-    # --- textured ground ---------------------------------------------------
-    # The ground is sampled on a *camera-aware fan*: depth is spaced
-    # quadratically (dense near the aircraft) and lateral extent grows with
-    # depth so that angular sampling density stays roughly constant. This keeps
-    # ground-truth depth maps nearly hole-free at small resolutions without
-    # needing millions of points.
-    nu, nz = 620, 720
-    u = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
-    zt = np.linspace(0.0, 1.0, nz, dtype=np.float32) ** 2
-    z = (1.5 + (180.0 - 1.5) * zt).astype(np.float32)
-    UU, ZZ = np.meshgrid(u, z, indexing="ij")
-    half_width = np.maximum(0.85 * ZZ, 32.0).astype(np.float32)
-    XX = (UU * half_width).astype(np.float32)
-    shape = XX.shape
-
-    # Height field in *world* space: fractal noise sampled on the ground grid.
-    height = 2.2 * (_fractal_noise(shape, rng, octaves=5, base=3) - 0.5)
-    # Fade the relief out far away so the horizon stays tidy.
-    height *= np.exp(-((ZZ - 40.0) / 90.0) ** 2).astype(np.float32)
-    ground = np.stack([XX.ravel(), height.ravel(), ZZ.ravel()], 1).astype(np.float32)
-
-    tex = _fractal_noise(shape, rng, octaves=5, base=2, persistence=0.6)
-    # Directional ripples add mid-frequency structure.
-    ripple = 0.15 * np.sin(0.9 * XX + 0.35 * ZZ) * np.sin(0.31 * ZZ - 0.17 * XX)
-    tex = np.clip(tex + ripple.astype(np.float32), 0.0, 1.0)
-
-    # --- painted ground-control markers -----------------------------------
-    # The pure fractal texture is not repeatable enough across viewpoints for
-    # SIFT: descriptors change with scale and the resulting matches are weak.
-    # Painting high-contrast concentric targets at deterministic world
-    # positions (the aerial-imagery analogue of painted GCPs) gives stable,
-    # repeatable corners, which is what a classical baseline actually needs.
-    from scipy.spatial import cKDTree
-
-    marker_rng = np.random.default_rng(seed + 991)
-    n_markers = int(marker_rng.integers(90, 140))
-    marker_xz = np.column_stack(
-        [
-            marker_rng.uniform(-58.0, 58.0, n_markers),
-            marker_rng.uniform(4.0, 150.0, n_markers),
-        ]
-    )
-    tree = cKDTree(marker_xz)
-    dist, _ = tree.query(np.column_stack([XX.ravel(), ZZ.ravel()]))
-    tex_flat = tex.ravel()
-    core = dist < 0.55
-    ring = (dist >= 0.55) & (dist < 1.25)
-    tex_flat[core] = 0.99
-    tex_flat[ring] = 0.03
-    tex = tex_flat.reshape(shape)
-
-    tint = np.array([1.0, 0.98, 0.92], np.float32)
-    colors = _palette(tex.ravel(), tint)
-
-    all_pts = [ground]
-    all_cols = [colors]
-
-    # --- boxes with exactly known heights ---------------------------------
-    box_meta = []
-    h_mid = height[nu // 2, :]
-    for i in range(n_boxes):
-        lateral = float(rng.uniform(-26.0, 26.0))
-        forward = float(rng.uniform(14.0, 110.0))
-        wx = float(rng.uniform(4.0, 11.0))
-        wz = float(rng.uniform(4.0, 11.0))
-        hgt = float(rng.uniform(3.0, 12.0))
-        # Sink the box slightly into the terrain so it never floats.
-        base = float(np.interp(forward, z, h_mid)) - 0.4
+    box_pts: list[np.ndarray] = []
+    box_cols: list[np.ndarray] = []
+    box_meta: list[dict] = []
+    for _ in range(int(n_boxes)):
+        lateral = float(rng.uniform(-42.0, 42.0))
+        forward = float(rng.uniform(18.0, 300.0))
+        wx = float(rng.uniform(5.0, 14.0))
+        wz = float(rng.uniform(5.0, 14.0))
+        hgt = float(rng.uniform(4.0, 16.0))
+        terrain = float(
+            ground.height(np.array([lateral], np.float32), np.array([forward], np.float32))[0]
+        )
+        base = terrain - 0.5
         center = np.array([lateral, base + hgt / 2.0, forward], np.float32)
         size = np.array([wx, hgt, wz], np.float32)
         pts, gray = _sample_box(center, size, samples_per_meter=6.0, rng=rng)
         tint = np.array(
-            [
-                float(rng.uniform(0.55, 1.0)),
-                float(rng.uniform(0.45, 0.95)),
-                float(rng.uniform(0.40, 0.90)),
-            ],
-            np.float32,
+            [rng.uniform(0.55, 1.0), rng.uniform(0.45, 0.95), rng.uniform(0.40, 0.90)], np.float32
         )
-        all_pts.append(pts)
-        all_cols.append(_palette(gray, tint))
+        box_pts.append(pts)
+        box_cols.append(_shade_box_colors(gray, tint))
         box_meta.append(
-            {
-                "center": center.tolist(),
-                "size": size.tolist(),
-                "height": hgt,
-                "base": base,
-            }
+            {"center": center.tolist(), "size": size.tolist(), "height": hgt, "base": base}
         )
 
-    points = np.concatenate(all_pts, 0)
-    colors = np.concatenate(all_cols, 0)
-
-    # --- simple lambertian shading from a fixed sun -------------------------
-    sun = np.array([0.35, 0.86, -0.37], np.float32)
-    sun /= np.linalg.norm(sun)
-    # Cheap normal proxy: how "up" the local neighbourhood is, from an
-    # approximate gradient of the point cloud is expensive, so shade the
-    # ground with the height-field gradient and the boxes with their face
-    # direction (encoded in the palette tint already). Good enough visually.
-    gy, gx_ = np.gradient(height.astype(np.float32))
-    n0 = np.stack([-gx_.ravel(), np.ones(gx_.size, np.float32), -gy.ravel()], 1)
-    n0 /= np.linalg.norm(n0, axis=1, keepdims=True)
-    shade = np.clip(n0 @ sun, 0.0, 1.0)
-    # normalize to mean ~1 so the ground is neither blown out nor black
-    shade = 0.45 + 0.55 * shade
-    colors[: ground.shape[0]] *= shade[:, None]
-
-    meta = {
-        "boxes": box_meta,
-        "ground_extent": {"x": [-60.0, 60.0], "z": [1.5, 180.0]},
-        "height_amplitude": 2.2,
-    }
-    return Scene(points=points, colors=colors, seed=seed, meta=meta)
+    points = np.concatenate(box_pts, 0)
+    colors = np.concatenate(box_cols, 0)
+    return Scene(
+        points=points,
+        colors=colors,
+        seed=seed,
+        ground=ground,
+        meta={
+            "boxes": box_meta,
+            "n_boxes": int(n_boxes),
+            "world_extent": list(WORLD_EXTENT),
+            "relief_amplitude_m": ground.relief_amplitude,
+        },
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -362,7 +524,42 @@ def distort_normalized(xy: np.ndarray, dist: TypingSequence[float]) -> np.ndarra
     return np.stack([xd, yd], axis=1)
 
 
-def _rotation_from_lookat(position: np.ndarray, target: np.ndarray, world_up: np.ndarray | None = None) -> np.ndarray:
+def project_points(
+    points: np.ndarray,
+    pose: np.ndarray,
+    K: np.ndarray,
+    dist: TypingSequence[float],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Project world points into an image with distortion.
+
+    Args:
+        points: ``(N, 3)`` world points.
+        pose: ``(4, 4)`` world->camera transform.
+        K: ``(3, 3)`` intrinsics.
+        dist: Distortion coefficients, OpenCV order.
+
+    Returns:
+        ``(pix, z, valid)`` where ``pix`` is ``(N, 2)`` float64 *continuous*
+        pixel coordinates, ``z`` is the camera-frame depth of every point, and
+        ``valid`` is a boolean mask for points in front of the camera.
+    """
+    P = np.asarray(points, np.float64)
+    pose = np.asarray(pose, np.float64)
+    cam = P @ pose[:3, :3].T + pose[:3, 3]
+    z = cam[:, 2]
+    valid = z > 1e-3
+    zz = np.where(valid, z, 1.0)
+    xy = cam[:, :2] / zz[:, None]
+    xyd = distort_normalized(xy, dist)
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+    pix = np.stack([fx * xyd[:, 0] + cx, fy * xyd[:, 1] + cy], axis=1)
+    return pix, z, valid
+
+
+def _rotation_from_lookat(
+    position: np.ndarray, target: np.ndarray, world_up: np.ndarray | None = None
+) -> np.ndarray:
     """World->camera rotation for a camera at ``position`` looking at ``target``.
 
     Builds a *proper* (det ``+1``) rotation for the OpenCV camera convention
@@ -372,12 +569,11 @@ def _rotation_from_lookat(position: np.ndarray, target: np.ndarray, world_up: np
     determinant of ``-1``, which silently breaks essential-matrix pose recovery.
     """
     up = np.array([0.0, 1.0, 0.0]) if world_up is None else np.asarray(world_up, np.float64)
-    z_c = target - position
+    z_c = np.asarray(target, np.float64) - np.asarray(position, np.float64)
     n = np.linalg.norm(z_c)
     if n < 1e-9:
         raise ValueError("camera position coincides with its look-at target")
     z_c = z_c / n
-    # image-right axis, then complete the right-handed frame with x cross y = z
     x_c = np.cross(z_c, up)
     nx = np.linalg.norm(x_c)
     if nx < 1e-9:  # looking straight up/down: pick any consistent right vector
@@ -402,41 +598,6 @@ def lookat_pose(position: np.ndarray, target: np.ndarray, roll_deg: float = 0.0)
     return pose
 
 
-def project_points(
-    points: np.ndarray,
-    pose: np.ndarray,
-    K: np.ndarray,
-    dist: TypingSequence[float],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Project world points into an image with distortion.
-
-    Args:
-        points: ``(N, 3)`` world points.
-        pose: ``(4, 4)`` world->camera transform.
-        K: ``(3, 3)`` intrinsics.
-        dist: Distortion coefficients, OpenCV order.
-
-    Returns:
-        ``(pix, z, valid)`` where ``pix`` is ``(N, 2)`` float64 pixel
-        coordinates (continuous, *before* rounding), ``z`` is the camera-frame
-        depth of every point, and ``valid`` is a boolean mask for points in
-        front of the camera.
-    """
-    P = np.asarray(points, np.float64)
-    R = np.asarray(pose, np.float64)[:3, :3]
-    t = np.asarray(pose, np.float64)[:3, 3]
-    cam = P @ R.T + t
-    z = cam[:, 2]
-    valid = z > 1e-3
-    zz = np.where(valid, z, 1.0)
-    xy = cam[:, :2] / zz[:, None]
-    xyd = distort_normalized(xy, dist)
-    fx, fy = K[0, 0], K[1, 1]
-    cx, cy = K[0, 2], K[1, 2]
-    pix = np.stack([fx * xyd[:, 0] + cx, fy * xyd[:, 1] + cy], axis=1)
-    return pix, z, valid
-
-
 def render_frame(
     scene: Scene,
     pose: np.ndarray,
@@ -444,48 +605,51 @@ def render_frame(
     dist: TypingSequence[float],
     size: tuple[int, int],
     splat: int = 2,
-    z_max: float = 400.0,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Splat a scene into one frame with a lexicographic z-buffer.
-
-    Every point is expanded to an ``splat x splat`` footprint and *all*
-    resulting samples are sorted by ``(pixel, depth)`` with :func:`numpy.lexsort`;
-    the first entry of each pixel group is therefore the nearest sample. This
-    gives a correct z-buffer, which matters: a naive per-offset painter's
-    algorithm lets a far sample overwrite a nearer one and silently corrupts
-    the ground-truth depth used to train the learned models.
+    z_max: float = 900.0,
+    ground_step: float = 1.0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Render one frame: ray-cast the terrain, add the boxes, and splat.
 
     Args:
-        scene: Textured point cloud.
+        scene: Scene to render.
         pose: ``(4, 4)`` world->camera transform.
         K: ``(3, 3)`` intrinsics.
         dist: Distortion coefficients.
         size: ``(height, width)`` output resolution.
-        splat: Side length in pixels of the square footprint of each point.
-        z_max: Points further than this are dropped.
+        splat: Side length in pixels of each sample's square footprint.
+        z_max: Samples further than this are dropped.
+        ground_step: Pixel spacing of the terrain ray grid.
 
     Returns:
-        ``(image, depth, pix, visible)``: uint8 ``(H, W, 3)`` frame, float32
-        ``(H, W)`` depth (0 where no point landed), the ``(M, 2)`` continuous
-        pixel coordinates of every kept point, and the ``(M,)`` boolean mask
-        indexing back into ``scene.points``.
+        ``(image, depth, pix, points, colors)``: uint8 ``(H, W, 3)`` frame,
+        float32 ``(H, W)`` depth (0 where no sample landed), the ``(M, 2)``
+        continuous pixel coordinates of every kept sample, and the ``(M, 3)``
+        world points / RGB colours that produced the image.
     """
     height, width = int(size[0]), int(size[1])
-    pix, z, valid = project_points(scene.points, pose, K, dist)
-    keep = valid & (z < z_max)
-    keep &= pix[:, 0] >= 0
-    keep &= pix[:, 1] >= 0
-    keep &= pix[:, 0] <= width - 1
-    keep &= pix[:, 1] <= height - 1
+    g_pts, g_cols = scene.raycast_ground(pose, K, size, step=ground_step)
+    if g_pts.shape[0]:
+        all_pts = np.concatenate([g_pts, scene.points], 0)
+        all_cols = np.concatenate([g_cols, scene.colors], 0)
+    else:
+        all_pts, all_cols = scene.points, scene.colors
 
-    p = pix[keep]
-    zz = z[keep]
-    cols = scene.colors[keep]
+    pix_all, z_all, valid = project_points(all_pts, pose, K, dist)
+    keep = valid & (z_all < z_max)
+    keep &= pix_all[:, 0] >= 0
+    keep &= pix_all[:, 1] >= 0
+    keep &= pix_all[:, 0] <= width - 1
+    keep &= pix_all[:, 1] <= height - 1
+
+    p = pix_all[keep]
+    zz = z_all[keep]
+    cols = all_cols[keep]
+    pts_kept = all_pts[keep]
 
     image = np.zeros((height, width, 3), np.uint8)
     depth = np.zeros((height, width), np.float32)
     if p.shape[0] == 0:
-        return image, depth, p, keep
+        return image, depth, p, pts_kept, cols
 
     base_x = np.rint(p[:, 0]).astype(np.int64)
     base_y = np.rint(p[:, 1]).astype(np.int64)
@@ -519,7 +683,7 @@ def render_frame(
     image.reshape(-1, 3)[flat[sel]] = (cols[sall[sel]] * 255.0 + 0.5).astype(np.uint8)
     depth.reshape(-1)[flat[sel]] = zall[sel]
 
-    return image, depth, p, keep
+    return image, depth, p, pts_kept, cols
 
 
 def render_sequence(
@@ -529,16 +693,18 @@ def render_sequence(
     dist: TypingSequence[float],
     size: tuple[int, int],
     splat: int = 2,
+    ground_step: float = 1.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Render a whole trajectory.
 
     Args:
-        scene: Textured point cloud.
+        scene: Scene to render.
         poses: ``(T, 4, 4)`` world->camera transforms.
         K: ``(3, 3)`` intrinsics.
         dist: Distortion coefficients.
         size: ``(height, width)`` output resolution.
-        splat: Point footprint side length in pixels.
+        splat: Footprint side length in pixels.
+        ground_step: Pixel spacing of the terrain ray grid.
 
     Returns:
         ``(frames, depths, poses)`` with shapes ``(T, H, W, 3)`` uint8,
@@ -547,14 +713,12 @@ def render_sequence(
     poses = np.asarray(poses, np.float64)
     frames, depths = [], []
     for pose in poses:
-        img, dep, _, _ = render_frame(scene, pose, K, dist, size, splat=splat)
+        img, dep, _, _, _ = render_frame(
+            scene, pose, K, dist, size, splat=splat, ground_step=ground_step
+        )
         frames.append(img)
         depths.append(dep)
-    return (
-        np.stack(frames, 0),
-        np.stack(depths, 0).astype(np.float32),
-        poses.astype(np.float32),
-    )
+    return np.stack(frames, 0), np.stack(depths, 0).astype(np.float32), poses.astype(np.float32)
 
 
 # --------------------------------------------------------------------------- #
@@ -569,8 +733,8 @@ def make_trajectory(
     """Generate a smooth 4x4 world->camera trajectory.
 
     The camera is pitched down by 15-25 degrees (a typical oblique aerial /
-    dashcam view) so that the ground fills most of the frame and lands at a
-    depth where consecutive frames have useful parallax.
+    dashcam view) so the ground fills most of the frame and lands at a depth
+    where consecutive frames have useful parallax.
 
     Args:
         kind: One of ``"forward"`` (straight flight with a gentle sway),
@@ -595,14 +759,9 @@ def make_trajectory(
     if kind == "forward":
         for i, t in enumerate(ts):
             pos = np.array(
-                [
-                    1.8 * np.sin(0.28 * t),
-                    alt0 + 0.6 * np.sin(0.21 * t + 0.6),
-                    4.0 + speed * t,
-                ]
+                [1.8 * np.sin(0.28 * t), alt0 + 0.6 * np.sin(0.21 * t + 0.6), 4.0 + speed * t]
             )
-            target = pos + np.array([0.0, -3.1, 11.0])
-            poses[i] = lookat_pose(pos, target)
+            poses[i] = lookat_pose(pos, pos + np.array([0.0, -3.1, 11.0]))
     elif kind == "orbit":
         center = np.array([0.0, 3.0, 34.0])
         radius = 20.0
@@ -617,13 +776,12 @@ def make_trajectory(
             pos = np.array(
                 [
                     0.5 * np.sin(0.22 * t),
-                    alt0 + 7.0 - 0.28 * t,
+                    max(3.5, alt0 + 7.0 - 0.115 * t),
                     4.0 + 0.9 * speed * t,
                 ]
             )
             # pitch the nose further down as the aircraft descends
-            target = pos + np.array([0.0, -2.6 - 0.05 * t, 11.0])
-            poses[i] = lookat_pose(pos, target)
+            poses[i] = lookat_pose(pos, pos + np.array([0.0, -2.6 - 0.02 * t, 11.0]))
     else:
         raise ValueError(f"unknown trajectory kind {kind!r}; expected forward|orbit|descent")
 
@@ -652,14 +810,12 @@ def make_checkerboard_points(
         rows: Number of *inner* corners along the board's vertical axis.
         cols: Number of *inner* corners along the board's horizontal axis.
         square_size: Physical square edge length in metres.
-        samples: Sub-samples per square edge (drives texture density).
+        samples: Sub-samples per square edge.
 
     Returns:
         ``(points, colors)`` where ``points`` is ``(M, 3)`` float32 on the
         ``Z = 0`` plane and ``colors`` is ``(M, 3)`` float32 greyscale RGB.
     """
-    # An ``cols x rows`` inner-corner pattern needs ``(cols+1) x (rows+1)``
-    # squares, plus a one-square white margin ring on every side.
     xs = (np.arange(-samples, (cols + 2) * samples + 1) / samples) * square_size
     ys = (np.arange(-samples, (rows + 2) * samples + 1) / samples) * square_size
     XX, YY = np.meshgrid(xs, ys, indexing="xy")
@@ -669,7 +825,6 @@ def make_checkerboard_points(
     in_pattern = (si >= 0) & (si <= cols) & (sj >= 0) & (sj <= rows)
     white = np.where(in_pattern, ((si + sj) % 2) == 0, True)
     val = np.where(white, 0.93, 0.05).astype(np.float32)
-    # Slight per-square exposure jitter (deterministic, no aliasing moire).
     jitter = 0.015 * (((np.abs(si) * 7 + np.abs(sj) * 13) % 5) / 4.0 - 0.5)
     val = np.clip(val + jitter, 0.0, 1.0).astype(np.float32)
 
@@ -704,13 +859,12 @@ def render_checkerboard_views(
         seed: Seed for the view sampling.
 
     Returns:
-        ``(images, objp, board_centers)``: a list of ``n`` uint8 images, the
+        ``(images, objp, board_centers)``: a list of ``n`` BGR uint8 images, the
         ``(rows*cols, 3)`` canonical object points (OpenCV convention, ``Z=0``),
         and the ``(n, 3)`` board centre used for each view.
     """
     rng = np.random.default_rng(seed)
     pts, cols_rgb = make_checkerboard_points(rows, cols, square_size, samples=16)
-    # Re-centre the board on the pattern centre so tilting rotates about it.
     mid = np.array([(cols + 1) * square_size / 2.0, (rows + 1) * square_size / 2.0, 0.0])
     pts_c = (pts - mid).astype(np.float64)
 
@@ -718,21 +872,11 @@ def render_checkerboard_views(
     centers = np.zeros((n, 3), np.float64)
     for i in range(n):
         board_dist = float(rng.uniform(0.42, 0.85))
-        # real tilt in all three axes, drifting across views
         ang_x = float(rng.uniform(-0.45, 0.45)) + 0.055 * i
         ang_y = float(rng.uniform(-0.5, 0.5)) - 0.045 * i
         ang_z = float(rng.uniform(-0.3, 0.3))
-        # camera sits on the -Z side looking down +Z at the board at Z = 0
-        pos = np.array(
-            [
-                float(rng.uniform(-0.10, 0.10)),
-                float(rng.uniform(-0.08, 0.08)),
-                -board_dist,
-            ]
-        )
+        pos = np.array([rng.uniform(-0.10, 0.10), rng.uniform(-0.08, 0.08), -board_dist])
         pose = lookat_pose(pos, pos + np.array([0.0, 0.0, 1.0]))
-
-        # roll the camera a little
         Rz = np.array(
             [
                 [np.cos(ang_z), -np.sin(ang_z), 0.0],
@@ -743,7 +887,6 @@ def render_checkerboard_views(
         pose[:3, :3] = Rz @ pose[:3, :3]
         pose[:3, 3] = -pose[:3, :3] @ pos
 
-        # tilt the *board* (pitch then yaw) about its centre
         Rx = np.array(
             [
                 [1.0, 0.0, 0.0],
@@ -758,17 +901,17 @@ def render_checkerboard_views(
                 [-np.sin(ang_y), 0.0, np.cos(ang_y)],
             ]
         )
-        tilt_scene = Scene(
+        board = Scene(
             points=(pts_c @ (Ry @ Rx).T).astype(np.float32),
             colors=cols_rgb.astype(np.float32),
             seed=seed,
-            meta={},
+            ground=None,
+            meta={"kind": "checkerboard"},
         )
-        img, _, _, _ = render_frame(tilt_scene, pose, K, dist, size, splat=3)
+        img, _, _, _, _ = render_frame(board, pose, K, dist, size, splat=3)
         images.append(img)
         centers[i] = pos
 
-    # canonical object points in the OpenCV calibration convention
     grid = np.zeros((rows * cols, 3), np.float32)
     gi, gj = np.meshgrid(np.arange(cols), np.arange(rows))
     grid[:, 0] = gi.ravel() * square_size
