@@ -1,0 +1,28 @@
+{
+  "step": "bench-cpp-vs-python",
+  "python": {
+    "mean_ms": 28.70142746003694,
+    "p50_ms": 28.64512499945704,
+    "p95_ms": 29.20730594851193,
+    "runs": 50,
+    "threads": 4,
+    "implementation": "python-pytorch"
+  },
+  "cpp": {
+    "mean_ms": 18.329671,
+    "p50_ms": 18.245834,
+    "p95_ms": 19.163352,
+    "runs": 50,
+    "threads": 4,
+    "backend": "cv::dnn (OpenCV 4.10.0)",
+    "model_load_ms": 27.602084
+  },
+  "speedup_mean": 1.5658452058434076,
+  "speedup_p50": 1.5699542700792433,
+  "speedup_p95": 1.5241230213019064,
+  "max_abs_diff": 2.09808e-05,
+  "mean_abs_diff": 3.507e-07,
+  "parity_threshold": 0.001,
+  "input_shape": "1x3x128x416",
+  "note": "Both timings measure one forward pass on the same fixed 1x3xHxW frame on CPU. The C++ side additionally verifies bit-level parity against the PyTorch output, so the speedup is a genuine replacement, not a different computation."
+}

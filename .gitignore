@@ -29,3 +29,9 @@ env/
 .idea/
 .DS_Store
 *.swp
+
+# local conda env used only to provide C++ OpenCV headers/libs on macOS
+.cv/
+
+# C++ build tree (already covered by build/, kept explicit)
+cpp/build/

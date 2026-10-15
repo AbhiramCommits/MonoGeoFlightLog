@@ -1,0 +1,21 @@
+{
+  "step": "cpp-depth-infer",
+  "backend": "cv::dnn (OpenCV 4.10.0)",
+  "threads": 4,
+  "runs": 50,
+  "warmup": 10,
+  "input_shape": [1, 3, 128, 416],
+  "input_shape_string": "1x3x128x416",
+  "mean_ms": 18.329671,
+  "p50_ms": 18.245834,
+  "p95_ms": 19.163352,
+  "min_ms": 17.577625,
+  "max_ms": 20.417291,
+  "model_load_ms": 27.602084,
+  "output_shape": "1x1x128x416",
+  "method": "one frame per timed call, cv::dnn forward, CPU, wall clock",
+  "parity_max_abs_diff": 0.0000209808,
+  "parity_mean_abs_diff": 0.0000003507,
+  "parity_threshold": 0.0010000000,
+  "onnx_path": "artifacts/depth_net.onnx"
+}
