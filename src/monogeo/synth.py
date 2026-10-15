@@ -205,7 +205,7 @@ def make_scene(seed: int = 0, n_boxes: int = 6) -> Scene:
     # depth so that angular sampling density stays roughly constant. This keeps
     # ground-truth depth maps nearly hole-free at small resolutions without
     # needing millions of points.
-    nu, nz = 600, 600
+    nu, nz = 620, 720
     u = np.linspace(-1.0, 1.0, nu, dtype=np.float32)
     zt = np.linspace(0.0, 1.0, nz, dtype=np.float32) ** 2
     z = (1.5 + (180.0 - 1.5) * zt).astype(np.float32)
@@ -220,10 +220,36 @@ def make_scene(seed: int = 0, n_boxes: int = 6) -> Scene:
     height *= np.exp(-((ZZ - 40.0) / 90.0) ** 2).astype(np.float32)
     ground = np.stack([XX.ravel(), height.ravel(), ZZ.ravel()], 1).astype(np.float32)
 
-    tex = _fractal_noise(shape, rng, octaves=7, base=2)
-    # Directional ripples add strong, non-repeating SIFT features.
-    ripple = 0.18 * np.sin(0.9 * XX + 0.35 * ZZ) * np.sin(0.31 * ZZ - 0.17 * XX)
+    tex = _fractal_noise(shape, rng, octaves=5, base=2, persistence=0.6)
+    # Directional ripples add mid-frequency structure.
+    ripple = 0.15 * np.sin(0.9 * XX + 0.35 * ZZ) * np.sin(0.31 * ZZ - 0.17 * XX)
     tex = np.clip(tex + ripple.astype(np.float32), 0.0, 1.0)
+
+    # --- painted ground-control markers -----------------------------------
+    # The pure fractal texture is not repeatable enough across viewpoints for
+    # SIFT: descriptors change with scale and the resulting matches are weak.
+    # Painting high-contrast concentric targets at deterministic world
+    # positions (the aerial-imagery analogue of painted GCPs) gives stable,
+    # repeatable corners, which is what a classical baseline actually needs.
+    from scipy.spatial import cKDTree
+
+    marker_rng = np.random.default_rng(seed + 991)
+    n_markers = int(marker_rng.integers(90, 140))
+    marker_xz = np.column_stack(
+        [
+            marker_rng.uniform(-58.0, 58.0, n_markers),
+            marker_rng.uniform(4.0, 150.0, n_markers),
+        ]
+    )
+    tree = cKDTree(marker_xz)
+    dist, _ = tree.query(np.column_stack([XX.ravel(), ZZ.ravel()]))
+    tex_flat = tex.ravel()
+    core = dist < 0.55
+    ring = (dist >= 0.55) & (dist < 1.25)
+    tex_flat[core] = 0.99
+    tex_flat[ring] = 0.03
+    tex = tex_flat.reshape(shape)
+
     tint = np.array([1.0, 0.98, 0.92], np.float32)
     colors = _palette(tex.ravel(), tint)
 
@@ -243,7 +269,7 @@ def make_scene(seed: int = 0, n_boxes: int = 6) -> Scene:
         base = float(np.interp(forward, z, h_mid)) - 0.4
         center = np.array([lateral, base + hgt / 2.0, forward], np.float32)
         size = np.array([wx, hgt, wz], np.float32)
-        pts, gray = _sample_box(center, size, samples_per_meter=3.5, rng=rng)
+        pts, gray = _sample_box(center, size, samples_per_meter=6.0, rng=rng)
         tint = np.array(
             [
                 float(rng.uniform(0.55, 1.0)),
@@ -420,11 +446,14 @@ def render_frame(
     splat: int = 2,
     z_max: float = 400.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Splat a scene into one frame with a painter's-algorithm z-buffer.
+    """Splat a scene into one frame with a lexicographic z-buffer.
 
-    Points are sorted far-to-near and written into the image buffer, so the
-    nearest point wins each pixel. Ground-truth depth is the camera-frame ``Z``
-    of the winning point.
+    Every point is expanded to an ``splat x splat`` footprint and *all*
+    resulting samples are sorted by ``(pixel, depth)`` with :func:`numpy.lexsort`;
+    the first entry of each pixel group is therefore the nearest sample. This
+    gives a correct z-buffer, which matters: a naive per-offset painter's
+    algorithm lets a far sample overwrite a nearer one and silently corrupts
+    the ground-truth depth used to train the learned models.
 
     Args:
         scene: Textured point cloud.
@@ -455,14 +484,14 @@ def render_frame(
 
     image = np.zeros((height, width, 3), np.uint8)
     depth = np.zeros((height, width), np.float32)
+    if p.shape[0] == 0:
+        return image, depth, p, keep
 
     base_x = np.rint(p[:, 0]).astype(np.int64)
     base_y = np.rint(p[:, 1]).astype(np.int64)
 
-    # far -> near so that nearer splats overwrite farther ones
-    order = np.argsort(-zz, kind="stable")
-
     offs = np.arange(splat) - (splat - 1) // 2
+    flats, zs, src = [], [], []
     for dy in offs:
         for dx in offs:
             yy = base_y + dy
@@ -471,10 +500,24 @@ def render_frame(
             if not np.any(ok):
                 continue
             idx = np.nonzero(ok)[0]
-            # re-apply far->near ordering inside this footprint
-            idx = idx[np.argsort(-zz[idx], kind="stable")]
-            image[yy[idx], xx[idx]] = (cols[idx] * 255.0 + 0.5).astype(np.uint8)
-            depth[yy[idx], xx[idx]] = zz[idx]
+            flats.append(yy[idx] * width + xx[idx])
+            zs.append(zz[idx].astype(np.float32))
+            src.append(idx)
+
+    flat = np.concatenate(flats)
+    zall = np.concatenate(zs)
+    sall = np.concatenate(src)
+
+    # primary key: pixel index; secondary key: depth ascending -> nearest wins
+    order = np.lexsort((zall, flat))
+    fs = flat[order]
+    first = np.empty(fs.shape[0], bool)
+    first[0] = True
+    np.not_equal(fs[1:], fs[:-1], out=first[1:])
+    sel = order[first]
+
+    image.reshape(-1, 3)[flat[sel]] = (cols[sall[sel]] * 255.0 + 0.5).astype(np.uint8)
+    depth.reshape(-1)[flat[sel]] = zall[sel]
 
     return image, depth, p, keep
 

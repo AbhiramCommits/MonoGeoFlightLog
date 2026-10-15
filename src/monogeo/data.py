@@ -36,7 +36,7 @@ SYNTHETIC_KINDS = ("forward", "orbit", "descent")
 
 #: Default render resolution (height, width) -- kept small so CPU training is
 #: minutes rather than hours.
-DEFAULT_SIZE = (96, 320)
+DEFAULT_SIZE = (128, 416)
 
 
 # --------------------------------------------------------------------------- #

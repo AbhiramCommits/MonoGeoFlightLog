@@ -18,8 +18,8 @@ data:
   eval_sequence: orbit
   # Domain-shift sequence (altitude change between train and test distributions).
   shift_sequence: descent
-  height: 96
-  width: 320
+  height: 128
+  width: 416
   num_frames: 48
   # Frames rendered/generated per second of flight log is irrelevant here; the
   # trajectory is parameterised in metres per frame instead.
@@ -46,8 +46,11 @@ twoview:
   ransac_prob: 0.999
   ransac_threshold_px: 1.0
   max_features: 4000
-  # Use frames this far apart for the headline two-view result.
-  frame_gap: 1
+  # Two-view geometry needs parallax: +/-1 frame at 1.6 m/frame against ~33 m
+  # depth is only ~5% baseline/depth, and the translation direction becomes
+  # ill-conditioned. Two frames apart doubles the baseline. Step 4 reports the
+  # short-baseline degradation explicitly.
+  frame_gap: 2
   # Report the headline number on the first pair plus a median over N pairs.
   num_pairs: 12
 
