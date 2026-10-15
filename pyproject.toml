@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "monogeo"
+version = "0.1.0"
+description = "Monocular geometry pipeline for aerial/driving flight logs: classical two-view, self-supervised depth + ego-motion, and end-to-end pointmap regression."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "MonoGeoFlightLog contributors" }]
+keywords = ["photogrammetry", "slam", "monodepth", "pointmap", "uav", "kitti"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+  "torch>=2.0",
+  "torchvision>=0.15",
+  "numpy>=1.24",
+  "opencv-python>=4.8",
+  "scipy>=1.10",
+  "matplotlib>=3.7",
+  "onnx>=1.14",
+  "onnxruntime>=1.16",
+  "pytest>=7.4",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.5", "black>=24.0"]
+
+[project.scripts]
+monogeo = "monogeo.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]

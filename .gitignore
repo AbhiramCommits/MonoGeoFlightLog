@@ -1,0 +1,31 @@
+# --- data and experiment artifacts that must not be committed ---------------
+data/
+runs/
+build/
+cpp/build/
+*.pt
+*.pth
+*.onnx
+*.engine
+
+# results/ is intentionally NOT ignored: the measured numbers are part of the repo.
+
+# --- python ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# --- editors / os ----------------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+*.swp
