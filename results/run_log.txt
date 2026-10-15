@@ -1,0 +1,187 @@
+MonoGeoFlightLog reproduction run
+date:       2026-10-15T12:28:58Z
+root:       /Users/abhiramkasireddi/MonoGeoFlightLog
+python:     Python 3.11.14 (.venv/bin/python)
+config:     configs/default.yaml
+host:       Darwin 27.0.0 arm64
+cpu count:  8
+
+==============================================================
+== 1/9 camera calibration from checkerboards
+==============================================================
+[calibrate] views used 16/20, RMS 0.3498 px
+[calibrate]   fx: est   529.535 true   532.569 err   3.035 px ( 0.57%)
+[calibrate]   fy: est   530.036 true   532.569 err   2.533 px ( 0.48%)
+[calibrate]   cx: est   317.892 true   319.500 err   1.608 px ( 0.50%)
+[calibrate]   cy: est   240.035 true   239.500 err   0.535 px ( 0.22%)
+[calibrate] distortion coeff error {'k1': -0.1271879442843544, 'k2': 0.08060042664019225, 'p1': 0.0009970211669817048, 'p2': -0.0009814720107244798, 'k3': -0.09873186873562133}
+[calibrate] distortion field displacement mean 0.1494 px, max 2.6383 px
+[calibrate] wrote results/calibration.json
+
+==============================================================
+== 2/9 classical two-view baseline (frame gap 2, plus gap 1 reference)
+==============================================================
+[two-view] forward (synthetic) 128x416, 12/12 usable pairs, gap=2
+[two-view]   matches 62, inliers 50, inlier ratio 0.815
+[two-view]   reprojection median 0.161 px, RMS 0.271 px
+[two-view]   rotation error 0.249 deg, translation angle error 2.813 deg
+[two-view]   recovered scale 3.261 (true baseline 3.283 m => scale IS the baseline)
+[two-view]   runtime 9.7 ms/pair
+[two-view] wrote results/two_view_baseline.json
+[two-view] forward (synthetic) 128x416, 12/12 usable pairs, gap=1
+[two-view]   matches 72, inliers 56, inlier ratio 0.792
+[two-view]   reprojection median 0.132 px, RMS 0.238 px
+[two-view]   rotation error 0.238 deg, translation angle error 3.790 deg
+[two-view]   recovered scale 1.731 (true baseline 1.642 m => scale IS the baseline)
+[two-view]   runtime 9.1 ms/pair
+[two-view] wrote results/two_view_baseline_gap1.json
+
+==============================================================
+== 3/9 self-supervised depth + ego-motion training
+==============================================================
+[train-depth] seed=0 size=416x128 epochs=12 batch=4 lr=0.0003
+[train-depth] train triplets 83 (synthetic), val triplets 12 (synthetic), data 0.2s
+[train-depth] parameters 25.65 M, supervised scales [0, 1, 2]
+[train-depth] epoch 1/12: train 0.24206 (photo 0.24200, smooth 0.06522, mask 0.456) | val 0.30077 | 19s
+[train-depth] epoch 2/12: train 0.18790 (photo 0.18786, smooth 0.04024, mask 0.629) | val 0.28706 | 37s
+[train-depth] epoch 3/12: train 0.18368 (photo 0.18365, smooth 0.03448, mask 0.647) | val 0.29443 | 54s
+[train-depth] epoch 4/12: train 0.17116 (photo 0.17113, smooth 0.03641, mask 0.700) | val 0.26202 | 71s
+[train-depth] epoch 5/12: train 0.15254 (photo 0.15250, smooth 0.03552, mask 0.730) | val 0.28455 | 89s
+[train-depth] epoch 6/12: train 0.14917 (photo 0.14913, smooth 0.03278, mask 0.741) | val 0.27874 | 107s
+[train-depth] epoch 7/12: train 0.13918 (photo 0.13915, smooth 0.03286, mask 0.770) | val 0.29356 | 126s
+[train-depth] epoch 8/12: train 0.13494 (photo 0.13491, smooth 0.03138, mask 0.775) | val 0.29535 | 145s
+[train-depth] epoch 9/12: train 0.12614 (photo 0.12611, smooth 0.03219, mask 0.806) | val 0.28044 | 165s
+[train-depth] epoch 10/12: train 0.11688 (photo 0.11685, smooth 0.03266, mask 0.812) | val 0.28962 | 185s
+[train-depth] epoch 11/12: train 0.12334 (photo 0.12331, smooth 0.03151, mask 0.804) | val 0.28939 | 204s
+[train-depth] epoch 12/12: train 0.11373 (photo 0.11370, smooth 0.03229, mask 0.821) | val 0.28867 | 224s
+[train-depth] photometric loss 0.24200 -> 0.11370 (53.0% reduction) in 224s
+[train-depth] saved runs/depth/depth.pt, runs/depth/pose.pt, runs/depth/log.csv
+
+==============================================================
+== 4/9 two-view pointmap training
+==============================================================
+[train-pointmap] seed=0 size=416x128 epochs=15 batch=2 lr=0.0003
+[train-pointmap] train pairs 83 (synthetic), val pairs 12 (synthetic)
+[train-pointmap] provenance: compact (trained here); parameters 1.74 M
+[train-pointmap] epoch 1/15: train 0.46067 (reg 0.54972, conf 1.570) | val 0.22219 | 2s
+[train-pointmap] epoch 2/15: train 0.18808 (reg 0.24816, conf 1.357) | val 0.17954 | 4s
+[train-pointmap] epoch 3/15: train 0.13177 (reg 0.18733, conf 1.326) | val 0.16859 | 6s
+[train-pointmap] epoch 4/15: train 0.07169 (reg 0.13455, conf 1.376) | val 0.11573 | 9s
+[train-pointmap] epoch 5/15: train 0.00572 (reg 0.08947, conf 1.530) | val 0.07050 | 11s
+[train-pointmap] epoch 6/15: train -0.03397 (reg 0.08193, conf 1.802) | val 0.07242 | 13s
+[train-pointmap] epoch 7/15: train -0.06179 (reg 0.09078, conf 2.177) | val 0.09034 | 15s
+[train-pointmap] epoch 8/15: train -0.09154 (reg 0.09293, conf 2.564) | val 0.13289 | 17s
+[train-pointmap] epoch 9/15: train -0.10306 (reg 0.11136, conf 2.986) | val 0.13667 | 19s
+[train-pointmap] epoch 10/15: train -0.12653 (reg 0.11010, conf 3.340) | val 0.14531 | 21s
+[train-pointmap] epoch 11/15: train -0.13940 (reg 0.11482, conf 3.645) | val 0.15581 | 23s
+[train-pointmap] epoch 12/15: train -0.16021 (reg 0.10864, conf 3.921) | val 0.17495 | 25s
+[train-pointmap] epoch 13/15: train -0.16869 (reg 0.11170, conf 4.153) | val 0.19254 | 27s
+[train-pointmap] epoch 14/15: train -0.17279 (reg 0.11401, conf 4.288) | val 0.19653 | 29s
+[train-pointmap] epoch 15/15: train -0.17571 (reg 0.11369, conf 4.344) | val 0.19670 | 31s
+[train-pointmap] confidence-weighted L1 0.54972 -> 0.11369 (79.3% reduction); total objective -0.17571 (negative is expected: the -alpha*log(conf) term is unbounded below) in 31s
+[train-pointmap] saved runs/pointmap/pointmap.pt and runs/pointmap/log.csv
+
+==============================================================
+== 5/9 three-way comparison with scale analysis
+==============================================================
+[compare] held-out frames 85..118 of forward (synthetic) 416x128, 33 pairs, gap=1
+[compare] evaluation slice forward[85:119], the training split is frames 1..84
+[compare] pointmap provenance: compact (trained here)
+
+[compare] per-method medians over held-out pairs
+[compare] method                           AbsRel  AbsRel*     d1    d1*     rot   trans  ms/frame
+[compare] classical_two_view                0.407    0.097  0.000  0.873   0.269   4.756      11.1
+[compare] self_supervised_monodepth         0.968    0.101  0.000  0.896   0.082 166.886      46.7
+[compare] pointmap                          0.975    0.032  0.000  0.987   0.585  23.157     143.4
+[compare] classical_two_view_gap2           0.689    0.076  0.000  0.927   0.321   3.494      11.3
+[compare] AbsRel/d1 = no alignment; AbsRel*/d1* = after median scaling
+[compare] scale[classical_two_view] factor 1.654 drift(std/mean) 0.642
+[compare] scale[self_supervised_monodepth] factor 32.705 drift(std/mean) 0.043
+[compare] scale[pointmap] factor 41.065 drift(std/mean) 0.050
+[compare] scale[classical_two_view_gap2] factor 3.206 drift(std/mean) 0.486
+[compare] wrote results/method_comparison.json
+
+==============================================================
+== 6/9 clean held-out metrics
+==============================================================
+[evaluate] held-out forward[85:119] (synthetic) 416x128, 34 frames
+
+[evaluate] depth (median over held-out pairs)
+[evaluate] method                        AbsRel  AbsRel*    d1*   RMSE*  ATE(m)      ms
+[evaluate] classical_two_view             0.407    0.094  0.861    7.33    2.08    11.1
+[evaluate] self_supervised_monodepth      0.967    0.101  0.896   14.79   44.40    46.5
+[evaluate] pointmap                       0.975    0.031  0.988    3.44    4.87   143.3
+[evaluate] * = after median scaling
+[evaluate] wrote results/metrics.json
+
+==============================================================
+== 7/9 corruption + domain-shift stress tests
+==============================================================
+[stress] base sequence forward[85:119] (synthetic), 34 frames
+[stress] corruptions ['motion_blur', 'low_texture', 'low_light', 'jpeg_artifacts'] at severities [1, 2, 3]
+[stress] motion_blur_sev1 ...
+[stress] motion_blur_sev2 ...
+[stress] motion_blur_sev3 ...
+[stress] low_texture_sev1 ...
+[stress] low_texture_sev2 ...
+[stress] low_texture_sev3 ...
+[stress] low_light_sev1 ...
+[stress] low_light_sev2 ...
+[stress] low_light_sev3 ...
+[stress] jpeg_artifacts_sev1 ...
+[stress] jpeg_artifacts_sev2 ...
+[stress] jpeg_artifacts_sev3 ...
+[stress] domain shift: altitude_descent (descent) ...
+[stress] domain shift: viewpoint_orbit (orbit) ...
+
+[stress] degradation vs clean (median-scaled AbsRel, %)
+[stress] variant                 classical_two_  self_supervise        pointmap
+[stress] motion_blur_sev1                  55.2            -7.7             4.8
+[stress] motion_blur_sev2                  14.4           -21.1            28.2
+[stress] motion_blur_sev3                  69.1           -33.8            51.9
+[stress] low_texture_sev1                  12.0           -28.6            25.0
+[stress] low_texture_sev2                  83.4           -64.5            70.0
+[stress] low_texture_sev3                 163.2           -60.8           100.7
+[stress] low_light_sev1                   241.5           -33.2           233.0
+[stress] low_light_sev2                     nan           -46.3           877.7
+[stress] low_light_sev3                     nan           -36.6          1321.5
+[stress] jpeg_artifacts_sev1               89.7            -6.5             5.5
+[stress] jpeg_artifacts_sev2              181.0            -5.6            15.4
+[stress] jpeg_artifacts_sev3              167.7           -14.9            33.6
+[stress] altitude_descent                  44.5           -15.5            58.3
+[stress] viewpoint_orbit                   76.8           199.6           642.5
+[stress] wrote results/stress_tests.json
+
+==============================================================
+== 8/9 figures
+==============================================================
+[make_plots] wrote results/figures/depth_error_bars.png
+[make_plots] wrote results/figures/trajectory.png
+[make_plots] wrote results/figures/corruption_curves.png
+[make_plots] wrote results/figures/qualitative_strip.png
+
+==============================================================
+== 9/9 C++17 ONNX inference, parity check and benchmark
+==============================================================
+SKIP_CPP=1 set: skipping ONNX export and C++ build
+
+==============================================================
+== report
+==============================================================
+[report] wrote results/RESULTS.md (10119 bytes)
+
+Done. Artifacts:
+  results/RESULTS.md
+  results/calibration.json
+  results/cpp_timing.json
+  results/cpp_vs_python.json
+  results/figures
+  results/method_comparison.json
+  results/metrics.json
+  results/python_timing.json
+  results/run_log.txt
+  results/stress_tests.json
+  results/two_view_baseline.json
+  results/two_view_baseline_gap1.json
+
+Full log: results/run_log.txt

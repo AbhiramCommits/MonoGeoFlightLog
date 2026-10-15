@@ -379,6 +379,14 @@ def evaluate_monodepth(
                 "depth_umeyama": um,
                 "alignment": uinfo,
                 "pose": perr,
+                # full target->source transform, so the per-pair estimates can be
+                # composed into a trajectory for ATE/RPE
+                "T_est": np.block(
+                    [
+                        [R_est_full, t_est_full.reshape(3, 1)],
+                        [np.zeros((1, 3)), np.ones((1, 1))],
+                    ]
+                ).tolist(),
                 "runtime_ms": (time.perf_counter() - t0) * 1000.0,
             }
         )
