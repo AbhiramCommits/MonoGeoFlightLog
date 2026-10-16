@@ -31,7 +31,7 @@ from .cli import cfg_get, save_json
 from .compare import load_depth_model
 from .data import load_sequence, slice_sequence, splits
 
-__all__ = ["DepthHeadExport", "percentiles", "run_export"]
+__all__ = ["DepthHeadExport", "lower_clip_to_relu", "percentiles", "run_export"]
 
 
 class DepthHeadExport(nn.Module):
@@ -61,6 +61,67 @@ class DepthHeadExport(nn.Module):
         """
         _, depth = self.depth_net(x)
         return depth
+
+
+def lower_clip_to_relu(model: Any) -> int:
+    """Rewrite every ``Clip(x, min, max)`` node as an equivalent ``Relu`` chain, in place.
+
+    Since opset 11, ONNX ``Clip`` takes its bounds as inputs instead of
+    attributes. OpenCV's ``cv::dnn`` importer only accepts that form from 4.7 on;
+    the OpenCV 4.6 that Ubuntu ships fails with
+    ``node_proto.input_size() == 1``. Here the ``Clip`` comes from the
+    ``disp.clamp(1e-6, 1 - 1e-6)`` in :func:`monogeo.models.depth_net.disp_to_depth`.
+    It is lowered to
+
+        t = min + Relu(x - min)    # == max(x, min)
+        y = t - Relu(t - max)      # == min(t, max)
+
+    using only ``Sub``/``Add``/``Relu``, which every ``cv::dnn`` release supports.
+    ``Min``/``Max`` would be the obvious lowering, but OpenCV 4.6 cannot take a
+    constant operand for them. Values below ``min`` come out as exactly ``min``,
+    and values above ``max`` come out as ``max`` up to one rounding step.
+    In-range values carry at most a relative rounding error of about 1 ulp. The
+    form is chosen so that no small value is ever recovered by subtracting it
+    from a large one. The PyTorch-vs-ONNX-Runtime check in
+    :func:`run_export` runs on the rewritten graph.
+
+    Args:
+        model: An ``onnx.ModelProto``; its graph is modified in place.
+
+    Returns:
+        Number of ``Clip`` nodes rewritten.
+    """
+    from onnx import helper
+
+    graph = model.graph
+    new_nodes = []
+    rewritten = 0
+    for node in graph.node:
+        lo = node.input[1] if len(node.input) > 1 else ""
+        hi = node.input[2] if len(node.input) > 2 else ""
+        if node.op_type != "Clip" or not (lo or hi):
+            new_nodes.append(node)
+            continue
+        base = node.name or f"Clip_{rewritten}"
+        cur, out = node.input[0], node.output[0]
+
+        def emit(op: str, inputs: list[str], output: str, base: str = base) -> None:
+            new_nodes.append(helper.make_node(op, inputs, [output], name=f"{base}/{output}"))
+
+        if lo:
+            nxt = f"{base}/max_out" if hi else out
+            emit("Sub", [cur, lo], f"{base}/lo_gap")
+            emit("Relu", [f"{base}/lo_gap"], f"{base}/lo_relu")
+            emit("Add", [lo, f"{base}/lo_relu"], nxt)
+            cur = nxt
+        if hi:
+            emit("Sub", [cur, hi], f"{base}/hi_gap")
+            emit("Relu", [f"{base}/hi_gap"], f"{base}/hi_relu")
+            emit("Sub", [cur, f"{base}/hi_relu"], out)
+        rewritten += 1
+    del graph.node[:]
+    graph.node.extend(new_nodes)
+    return rewritten
 
 
 def percentiles(values: list[float]) -> dict[str, float]:
@@ -178,6 +239,10 @@ def run_export(args: Any) -> int:
     import onnx
 
     model = onnx.load(str(onnx_path))
+    n_clip = lower_clip_to_relu(model)
+    if n_clip:
+        onnx.save(model, str(onnx_path))
+        print(f"[export] lowered {n_clip} Clip node(s) to Relu for OpenCV 4.6 cv::dnn")
     onnx.checker.check_model(model)
     print(f"[export] onnx.checker OK, {len(model.graph.node)} nodes")
 
