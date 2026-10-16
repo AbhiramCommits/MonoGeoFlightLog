@@ -107,17 +107,11 @@ def main(argv: list[str] | None = None) -> int:
     x = range(len(labels))
     w = 0.55
     axes[0].bar(x, means, w, color=["#4c72b0", "#dd8452"], label="mean")
-    axes[0].errorbar(
-        x,
-        means,
-        yerr=[
-            [m - p for m, p in zip(means, p50s, strict=False)],
-            [p - m for m, p in zip(means, p95s, strict=False)],
-        ],
-        fmt="none",
-        ecolor="k",
-        capsize=6,
-    )
+    # Draw the p50..p95 whisker directly. errorbar() needs it as offsets from the
+    # mean, which go negative (and raise) whenever p50 > mean, e.g. a run with a
+    # few unusually fast iterations.
+    for i, (p50, p95) in enumerate(zip(p50s, p95s, strict=True)):
+        axes[0].plot([i, i], [p50, p95], color="k", marker="_", markersize=12, lw=1)
     axes[0].set_xticks(list(x))
     axes[0].set_xticklabels(labels)
     axes[0].set_ylabel("ms per frame")
